@@ -17,7 +17,7 @@
   const OFFICIAL_FOCUS_STYLE_ID = "collab-remote-focus-styles";
   const LIVE_FOCUS_STYLE_ID = "pixmax-canvas-cloner-live-focus-colors";
   const LIVE_SELECTION_STYLE_ID = "pixmax-canvas-cloner-live-selection-color";
-  const STYLE_VERSION = "1.4.17";
+  const STYLE_VERSION = "1.4.18";
   const TOAST_ID = "pixmax-canvas-cloner-toast";
   const LIVE_TOGGLE_ID = "pixmax-canvas-cloner-live-toggle";
   const OPEN_LIKES_BUTTON_ID = "pixmax-canvas-cloner-open-likes";
@@ -477,18 +477,12 @@
         display: none !important;
         pointer-events: none !important;
       }
-      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR} {
-        content-visibility: auto;
-        contain: layout style paint !important;
-        contain-intrinsic-size: 360px 280px !important;
-      }
       html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}.pixmax-canvas-cloner-perf-offscreen-node {
         display: block !important;
         opacity: 1 !important;
         visibility: visible !important;
-        content-visibility: auto !important;
-        contain: layout style paint !important;
-        contain-intrinsic-size: 360px 280px !important;
+        content-visibility: visible !important;
+        contain: none !important;
       }
       html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}.pixmax-canvas-cloner-perf-onscreen-node,
       html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}.selected,
@@ -498,6 +492,7 @@
         opacity: 1 !important;
         visibility: visible !important;
         content-visibility: visible !important;
+        contain: none !important;
       }
     `;
     document.head.appendChild(style);
