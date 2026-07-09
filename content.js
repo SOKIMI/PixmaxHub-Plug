@@ -17,14 +17,19 @@
   const OFFICIAL_FOCUS_STYLE_ID = "collab-remote-focus-styles";
   const LIVE_FOCUS_STYLE_ID = "pixmax-canvas-cloner-live-focus-colors";
   const LIVE_SELECTION_STYLE_ID = "pixmax-canvas-cloner-live-selection-color";
-  const STYLE_VERSION = "1.4.18";
+  const STYLE_VERSION = "1.4.29";
   const TOAST_ID = "pixmax-canvas-cloner-toast";
   const LIVE_TOGGLE_ID = "pixmax-canvas-cloner-live-toggle";
   const OPEN_LIKES_BUTTON_ID = "pixmax-canvas-cloner-open-likes";
   const PERFORMANCE_BUTTON_ID = "pixmax-canvas-cloner-performance-toggle";
+  const VIDEO_HISTORY_BUTTON_ID = "pixmax-canvas-cloner-video-history-button";
+  const VIDEO_HISTORY_PANEL_ID = "pixmax-canvas-cloner-video-history-panel";
+  const FOCUS_COMPLETE_EVENT = "pixmax-canvas-cloner:focus-complete";
   const LIVE_CURSOR_LAYER_ID = "pixmax-canvas-cloner-live-cursors";
   const LIKES_STORAGE_KEY = "pixmaxLikedItems";
   const PERFORMANCE_MODE_STORAGE_KEY = "pixmaxCanvasPerformanceMode";
+  const VIDEO_HISTORY_STORAGE_KEY = "pixmaxCanvasVideoHistory";
+  const VIDEO_HISTORY_PAGE_SIZE = 10;
   const WATCHED_VIDEO_STORAGE_KEY = "pixmaxWatchedVideoKeys";
   const WATCHED_VIDEO_CANVAS_BASELINES_KEY = "pixmaxWatchedVideoCanvasBaselines";
   const KNOWN_VIDEO_CANVAS_MODEL_KEY = "pixmaxKnownVideoCanvasModelAt";
@@ -74,6 +79,18 @@
   let toolbarSyncScheduled = false;
   let contextPasteSyncScheduled = false;
   let legacyCleanupScheduled = false;
+  let videoHistoryItems = [];
+  let videoHistoryVisibleCount = VIDEO_HISTORY_PAGE_SIZE;
+  let videoHistoryOpen = false;
+  let videoHistoryLoading = false;
+  let videoHistoryEntryScheduled = false;
+  let videoHistoryHasLoadedOnce = false;
+  let videoHistoryRefreshTimer = 0;
+  let videoHistoryPanelElement = null;
+  let videoHistoryRenderedKey = "";
+  let videoHistoryPositionTimers = new Set();
+  let videoHistoryPositionScheduled = false;
+  let officialViewportPersistTimers = new Set();
   let performanceModeEnabled = false;
   let performanceUpdateScheduled = false;
   let performanceUpdateTimer = 0;
@@ -494,6 +511,190 @@
         content-visibility: visible !important;
         contain: none !important;
       }
+      #${VIDEO_HISTORY_BUTTON_ID} {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        font: inherit;
+      }
+      #${VIDEO_HISTORY_BUTTON_ID}[data-active="true"] {
+        color: #f5f8ff;
+        box-shadow: inset 0 -3px 0 #75e9f4;
+      }
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"] {
+        color: #aab1bb !important;
+        border-color: transparent !important;
+        border-bottom-color: transparent !important;
+        box-shadow: none !important;
+        text-decoration-color: transparent !important;
+      }
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"] *,
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"] *[class] {
+        border-color: transparent !important;
+        border-bottom-color: transparent !important;
+        box-shadow: none !important;
+        text-decoration-color: transparent !important;
+        background-image: none !important;
+      }
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"]::before,
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"]::after {
+        content: none !important;
+        display: none !important;
+        opacity: 0 !important;
+        background: transparent !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+      }
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"] *::before,
+      html.pixmax-canvas-cloner-video-history-open [data-pixmax-video-history-native-tab="true"] *::after {
+        content: none !important;
+        display: none !important;
+        opacity: 0 !important;
+        background: transparent !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+      }
+      #${VIDEO_HISTORY_BUTTON_ID}.pixmax-canvas-cloner-video-history-floating {
+        display: none !important;
+      }
+      #${VIDEO_HISTORY_PANEL_ID} {
+        position: absolute;
+        inset: var(--pixmax-video-history-shell-top, 140px) 0 0 0;
+        z-index: 2147483644;
+        display: none;
+        width: auto;
+        height: auto;
+        max-height: none;
+        border: 0;
+        border-radius: 0;
+        background: #111317;
+        color: #edf1f7;
+        box-shadow: none;
+        overflow: hidden;
+        font: inherit;
+      }
+      #${VIDEO_HISTORY_PANEL_ID}[data-open="true"] {
+        display: flex;
+        flex-direction: column;
+      }
+      #${VIDEO_HISTORY_PANEL_ID}[data-embedded="true"] {
+        position: absolute;
+      }
+      #${VIDEO_HISTORY_PANEL_ID}[data-embedded="false"] {
+        display: none !important;
+      }
+      .pixmax-canvas-cloner-video-history-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-height: 42px;
+        border-bottom: 1px solid #2a2d34;
+        padding: 0 12px;
+      }
+      .pixmax-canvas-cloner-video-history-title {
+        overflow: hidden;
+        color: #f5f8ff;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pixmax-canvas-cloner-video-history-actions {
+        display: inline-flex;
+        gap: 6px;
+      }
+      .pixmax-canvas-cloner-video-history-actions button,
+      .pixmax-canvas-cloner-video-history-card button {
+        min-height: 30px;
+        border: 1px solid #3b4049;
+        border-radius: 7px;
+        padding: 0 10px;
+        background: #20242b;
+        color: #e9edf4;
+        cursor: pointer;
+        font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .pixmax-canvas-cloner-video-history-actions button:hover,
+      .pixmax-canvas-cloner-video-history-card button:hover {
+        border-color: #75e9f4;
+        color: #75e9f4;
+      }
+      .pixmax-canvas-cloner-video-history-list {
+        flex: 1;
+        min-height: 220px;
+        overflow: auto;
+        padding: 24px 32px 32px;
+      }
+      #${VIDEO_HISTORY_PANEL_ID}[data-embedded="true"] .pixmax-canvas-cloner-video-history-list {
+        min-height: 260px;
+      }
+      .pixmax-canvas-cloner-video-history-empty {
+        padding: 38px 12px;
+        color: #9aa2ad;
+        text-align: center;
+      }
+      .pixmax-canvas-cloner-video-history-card {
+        position: relative;
+        border: 1px solid #30343b;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        background: #1b1e24;
+        overflow: hidden;
+      }
+      .pixmax-canvas-cloner-video-history-card[data-unwatched="true"]::before {
+        content: "";
+        position: absolute;
+        top: 9px;
+        left: 9px;
+        z-index: 2;
+        width: 12px;
+        height: 12px;
+        border: 2px solid #111318;
+        border-radius: 999px;
+        background: #ffd500;
+        box-shadow: 0 0 0 1px rgb(255 255 255 / 75%);
+      }
+      .pixmax-canvas-cloner-video-history-card video {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background: #050608;
+        object-fit: contain;
+      }
+      .pixmax-canvas-cloner-video-history-meta {
+        display: grid;
+        gap: 6px;
+        padding: 10px;
+      }
+      .pixmax-canvas-cloner-video-history-time {
+        color: #aab1bb;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .pixmax-canvas-cloner-video-history-card-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 0 10px 10px;
+      }
+      .pixmax-canvas-cloner-video-history-card-actions .pixmax-canvas-cloner-video-history-like {
+        display: inline-grid;
+        width: 32px;
+        min-width: 32px;
+        place-items: center;
+        padding: 0;
+        font-size: 16px;
+      }
+      .pixmax-canvas-cloner-video-history-card-actions .pixmax-canvas-cloner-video-history-like[data-liked="true"] {
+        border-color: var(--pixmax-cloner-like-color, #ff3864);
+        background: var(--pixmax-cloner-like-color, #ff3864);
+        color: #fff;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -769,6 +970,7 @@
 
   function handlePerformancePointerDown(event) {
     const flowEvent = isPerformanceFlowEvent(event);
+    if (flowEvent) cancelPendingOfficialWorkflowViewportPersist();
     const target = event?.target;
     setCanvasNodeDragState(Boolean(flowEvent && target instanceof Element && target.closest(NODE_SELECTOR)));
     performancePointerDownInFlow = Boolean(performanceModeEnabled && flowEvent);
@@ -799,6 +1001,7 @@
 
   function handlePerformanceWheel(event) {
     if (!isPerformanceFlowEvent(event)) return;
+    cancelPendingOfficialWorkflowViewportPersist();
     markPerformanceInteraction(320);
   }
 
@@ -963,6 +1166,710 @@
     ));
   }
 
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => (
+      {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]
+    ));
+  }
+
+  function getVideoHistoryCanvasKey() {
+    return getCurrentFileUuid() || location.pathname;
+  }
+
+  function getVideoHistoryItemKey(item) {
+    return String(item?.watchKey || item?.url || item?.nodeId || "").trim();
+  }
+
+  function normalizeVideoHistoryItem(item) {
+    if (!item || typeof item !== "object") return null;
+    const key = getVideoHistoryItemKey(item);
+    const nodeId = String(item.nodeId || "").trim();
+    const url = String(item.url || "").trim();
+    if (!key || !nodeId || !url) return null;
+    const timestamp = String(item.createdAt || item.discoveredAt || "").trim() || new Date().toISOString();
+    const discoveredAt = String(item.discoveredAt || "").trim() || new Date().toISOString();
+    return {
+      assetUuid: String(item.assetUuid || "").trim(),
+      createdAt: timestamp,
+      discoveredAt,
+      downloadCode: String(item.downloadCode || "").trim(),
+      fileUuid: String(item.fileUuid || getCurrentFileUuid() || "").trim(),
+      focusRect: item.focusRect && typeof item.focusRect === "object" ? item.focusRect : null,
+      name: String(item.name || "视频生成节点").trim(),
+      nodeId,
+      poster: String(item.poster || "").trim(),
+      prompt: String(item.prompt || "").trim(),
+      url,
+      watchKey: String(item.watchKey || key).trim()
+    };
+  }
+
+  function sortVideoHistoryItems(items) {
+    return [...items].sort((first, second) => {
+      const firstTime = Date.parse(first.createdAt || first.discoveredAt || "") || 0;
+      const secondTime = Date.parse(second.createdAt || second.discoveredAt || "") || 0;
+      if (firstTime !== secondTime) return firstTime - secondTime;
+      return String(first.nodeId).localeCompare(String(second.nodeId));
+    });
+  }
+
+  function mergeVideoHistoryItems(existingItems, incomingItems) {
+    const merged = new Map();
+    for (const item of [...existingItems, ...incomingItems]) {
+      const normalized = normalizeVideoHistoryItem(item);
+      if (!normalized) continue;
+      const key = getVideoHistoryItemKey(normalized);
+      const previous = merged.get(key);
+      merged.set(key, {
+        ...(previous || {}),
+        ...normalized,
+        discoveredAt: previous?.discoveredAt || normalized.discoveredAt
+      });
+    }
+    return sortVideoHistoryItems([...merged.values()]);
+  }
+
+  async function readVideoHistoryStore() {
+    const result = await storageGet({ [VIDEO_HISTORY_STORAGE_KEY]: {} });
+    const store = result[VIDEO_HISTORY_STORAGE_KEY];
+    return store && typeof store === "object" && !Array.isArray(store) ? store : {};
+  }
+
+  async function writeVideoHistoryStore(items) {
+    const key = getVideoHistoryCanvasKey();
+    if (!key) return;
+    const store = await readVideoHistoryStore();
+    store[key] = sortVideoHistoryItems(items).slice(-300);
+    await storageSet({ [VIDEO_HISTORY_STORAGE_KEY]: store });
+  }
+
+  async function loadCachedVideoHistory() {
+    const key = getVideoHistoryCanvasKey();
+    const store = await readVideoHistoryStore();
+    videoHistoryItems = sortVideoHistoryItems(
+      Array.isArray(store[key]) ? store[key].map(normalizeVideoHistoryItem).filter(Boolean) : []
+    );
+  }
+
+  function getVisibleVideoHistoryItems() {
+    return videoHistoryItems.slice(-Math.max(VIDEO_HISTORY_PAGE_SIZE, videoHistoryVisibleCount));
+  }
+
+  function formatVideoHistoryTime(value) {
+    const date = new Date(value || "");
+    if (!Number.isFinite(date.getTime())) return "";
+    return date.toLocaleString();
+  }
+
+  function findCanvasTabsContainer() {
+    const elements = [...document.querySelectorAll("button, [role='tab'], div, span")];
+    const canvasTab = elements.find((element) => (
+      element.id !== VIDEO_HISTORY_BUTTON_ID &&
+      element.textContent?.trim() === "画布" &&
+      isVisibleVideoHistoryTabCandidate(element)
+    ));
+    if (!canvasTab) return null;
+    for (const container of [canvasTab.parentElement, canvasTab.parentElement?.parentElement].filter(Boolean)) {
+      const children = [...container.children];
+      if (
+        isVisibleVideoHistoryTabContainer(container) &&
+        children.some((child) => child.textContent?.trim() === "节点" && isVisibleVideoHistoryTabCandidate(child))
+      ) {
+        return container;
+      }
+    }
+    return null;
+  }
+
+  function isVisibleVideoHistoryTabCandidate(element) {
+    const rect = element?.getBoundingClientRect?.();
+    const style = element ? getComputedStyle(element) : null;
+    return Boolean(
+      rect &&
+      rect.width >= 20 &&
+      rect.height >= 20 &&
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      style?.display !== "none" &&
+      style?.visibility !== "hidden"
+    );
+  }
+
+  function isVisibleVideoHistoryTabContainer(container) {
+    const rect = container?.getBoundingClientRect?.();
+    const style = container ? getComputedStyle(container) : null;
+    return Boolean(
+      rect &&
+      rect.width >= 80 &&
+      rect.height >= 20 &&
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      style?.display !== "none" &&
+      style?.visibility !== "hidden"
+    );
+  }
+
+  function ensureVideoHistoryEntry() {
+    videoHistoryEntryScheduled = false;
+    let button = document.getElementById(VIDEO_HISTORY_BUTTON_ID);
+    const container = findCanvasTabsContainer();
+    if (!container) {
+      if (button?.parentElement) button.remove();
+      ensureVideoHistoryPanel();
+      return;
+    }
+    if (!button) {
+      const nodeTab = [...container.children].find((child) => child.textContent?.trim() === "节点");
+      button = nodeTab ? nodeTab.cloneNode(false) : document.createElement("button");
+      button.id = VIDEO_HISTORY_BUTTON_ID;
+      button.type = "button";
+      button.textContent = "视频";
+      button.title = "打开视频节点";
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleVideoHistoryPanel(true);
+      });
+    }
+    const nodeTab = [...container.children].find((child) => child.textContent?.trim() === "节点");
+    syncVideoHistoryTabButton(button, nodeTab);
+    button.dataset.active = videoHistoryOpen ? "true" : "false";
+    bindVideoHistoryTabContainer(container);
+    markVideoHistoryNativeTabs(container);
+    if (button.parentElement !== container) {
+      nodeTab?.after(button);
+      button.classList.remove("pixmax-canvas-cloner-video-history-floating");
+    }
+    ensureVideoHistoryPanel();
+  }
+
+  function syncVideoHistoryTabButton(button, sourceTab) {
+    if (!button || !sourceTab) return;
+    button.className = sourceTab.className || "";
+    for (const attr of ["role", "tabindex", "aria-selected"]) {
+      if (sourceTab.hasAttribute(attr)) {
+        button.setAttribute(attr, attr === "aria-selected" ? String(videoHistoryOpen) : sourceTab.getAttribute(attr));
+      } else {
+        button.removeAttribute(attr);
+      }
+    }
+  }
+
+  function scheduleVideoHistoryEntrySync(delay = 300) {
+    if (videoHistoryEntryScheduled) return;
+    videoHistoryEntryScheduled = true;
+    window.setTimeout(ensureVideoHistoryEntry, delay);
+  }
+
+  function bindVideoHistoryTabContainer(container) {
+    if (!container || container.__pixmaxCanvasClonerVideoHistoryTabsBound) return;
+    container.__pixmaxCanvasClonerVideoHistoryTabsBound = true;
+    container.addEventListener("click", (event) => {
+      const tab = event.target?.closest?.("button, [role='tab'], div, span");
+      if (!tab || tab.id === VIDEO_HISTORY_BUTTON_ID || tab.closest?.(`#${VIDEO_HISTORY_BUTTON_ID}`)) return;
+      const label = tab.textContent?.trim();
+      if (label === "画布" || label === "节点") toggleVideoHistoryPanel(false);
+    });
+  }
+
+  function markVideoHistoryNativeTabs(container) {
+    for (const child of container.children) {
+      const label = child.textContent?.trim();
+      if (label === "画布" || label === "节点") {
+        child.dataset.pixmaxVideoHistoryNativeTab = "true";
+      }
+    }
+  }
+
+  function updateVideoHistoryNativeTabIndicators(open = videoHistoryOpen) {
+    restoreVideoHistoryNativeTabIndicators();
+    if (!open) return;
+    const container = findCanvasTabsContainer();
+    const host = container?.parentElement;
+    if (!container || !host) return;
+    const tabRowRect = container.getBoundingClientRect();
+    const nativeRects = [...container.querySelectorAll("[data-pixmax-video-history-native-tab='true']")]
+      .map((element) => element.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    if (!nativeRects.length) return;
+    for (const element of host.querySelectorAll("*")) {
+      if (element.id === VIDEO_HISTORY_BUTTON_ID || element.closest?.(`#${VIDEO_HISTORY_BUTTON_ID}, #${VIDEO_HISTORY_PANEL_ID}`)) continue;
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 16 || rect.width > 140 || rect.height < 2 || rect.height > 10) continue;
+      if (Math.abs(rect.bottom - tabRowRect.bottom) > 14 && Math.abs(rect.top - tabRowRect.bottom) > 14) continue;
+      if (!nativeRects.some((nativeRect) => rect.left < nativeRect.right && rect.right > nativeRect.left)) continue;
+      const style = getComputedStyle(element);
+      if (!isVideoHistoryTabIndicatorStyle(style)) continue;
+      element.dataset.pixmaxVideoHistoryNativeIndicator = "true";
+      element.dataset.pixmaxVideoHistoryIndicatorOpacity = element.style.opacity || "";
+      element.dataset.pixmaxVideoHistoryIndicatorVisibility = element.style.visibility || "";
+      element.style.opacity = "0";
+      element.style.visibility = "hidden";
+    }
+  }
+
+  function restoreVideoHistoryNativeTabIndicators() {
+    for (const element of document.querySelectorAll("[data-pixmax-video-history-native-indicator='true']")) {
+      element.style.opacity = element.dataset.pixmaxVideoHistoryIndicatorOpacity || "";
+      element.style.visibility = element.dataset.pixmaxVideoHistoryIndicatorVisibility || "";
+      delete element.dataset.pixmaxVideoHistoryNativeIndicator;
+      delete element.dataset.pixmaxVideoHistoryIndicatorOpacity;
+      delete element.dataset.pixmaxVideoHistoryIndicatorVisibility;
+    }
+  }
+
+  function isVideoHistoryTabIndicatorStyle(style) {
+    const colors = [
+      style.backgroundColor,
+      style.borderColor,
+      style.borderBottomColor,
+      style.boxShadow
+    ].join(" ");
+    if (/75,\s*233,\s*244|117,\s*233,\s*244|#75e9f4/i.test(colors)) return true;
+    return /rgb\(\s*(6\d|7\d|8\d|9\d|1[01]\d|12\d)\s*,\s*(19\d|2[0-5]\d)\s*,\s*(19\d|2[0-5]\d)\s*\)/i.test(colors);
+  }
+
+  function ensureVideoHistoryPanel() {
+    let panel = videoHistoryPanelElement || document.getElementById(VIDEO_HISTORY_PANEL_ID);
+    if (!panel) {
+      panel = document.createElement("section");
+      panel.id = VIDEO_HISTORY_PANEL_ID;
+      panel.innerHTML = `<div class="pixmax-canvas-cloner-video-history-list"></div>`;
+      panel.addEventListener("click", handleVideoHistoryPanelClick);
+      panel.querySelector(".pixmax-canvas-cloner-video-history-list")?.addEventListener("scroll", handleVideoHistoryScroll);
+    }
+    videoHistoryPanelElement = panel;
+    mountVideoHistoryPanel(panel);
+    return panel;
+  }
+
+  function mountVideoHistoryPanel(panel) {
+    const container = findCanvasTabsContainer();
+    if (container?.isConnected) {
+      const shell = findVideoHistoryPanelShell(container, container.getBoundingClientRect());
+      if (shell?.isConnected) {
+        prepareVideoHistoryPanelShell(shell);
+        if (panel.parentElement !== shell) shell.appendChild(panel);
+        panel.dataset.embedded = "true";
+        if (videoHistoryOpen) scheduleVideoHistoryPanelPositioning();
+      } else {
+        panel.dataset.embedded = "false";
+      }
+      return;
+    }
+    panel.dataset.embedded = "false";
+  }
+
+  function toggleVideoHistoryPanel(forceOpen = null) {
+    const nextOpen = forceOpen == null ? !videoHistoryOpen : Boolean(forceOpen);
+    videoHistoryOpen = nextOpen;
+    const panel = ensureVideoHistoryPanel();
+    scheduleVideoHistoryPanelPositioning();
+    panel.dataset.open = videoHistoryOpen ? "true" : "false";
+    document.documentElement.classList.toggle("pixmax-canvas-cloner-video-history-open", videoHistoryOpen);
+    document.getElementById(VIDEO_HISTORY_BUTTON_ID)?.setAttribute("data-active", videoHistoryOpen ? "true" : "false");
+    updateVideoHistoryNativeTabIndicators(videoHistoryOpen);
+    updateVideoHistoryEmbeddedContentVisibility();
+    if (videoHistoryOpen) {
+      videoHistoryVisibleCount = VIDEO_HISTORY_PAGE_SIZE;
+      renderVideoHistoryPanel({ stickToBottom: true });
+      refreshVideoHistory({ stickToBottom: true });
+    }
+  }
+
+  function renderVideoHistoryPanel(options = {}) {
+    const panel = ensureVideoHistoryPanel();
+    scheduleVideoHistoryPanelPositioning();
+    updateVideoHistoryEmbeddedContentVisibility();
+    const list = panel.querySelector(".pixmax-canvas-cloner-video-history-list");
+    if (!list) return;
+    const visibleItems = getVisibleVideoHistoryItems();
+    const nextRenderKey = buildVideoHistoryRenderKey(visibleItems);
+    if (!visibleItems.length) {
+      if (videoHistoryRenderedKey !== nextRenderKey) {
+        list.innerHTML = `<div class="pixmax-canvas-cloner-video-history-empty">${videoHistoryLoading ? "正在读取视频节点..." : "这个画布还没有记录到视频节点。"}</div>`;
+        videoHistoryRenderedKey = nextRenderKey;
+      }
+      return;
+    }
+    if (videoHistoryRenderedKey !== nextRenderKey || !list.querySelector(".pixmax-canvas-cloner-video-history-card")) {
+      list.innerHTML = visibleItems.map(renderVideoHistoryCard).join("");
+      videoHistoryRenderedKey = nextRenderKey;
+      hydrateVideoHistoryCards(list);
+    } else {
+      updateVideoHistoryUnreadMarks();
+      updateVideoHistoryLikeMarks();
+    }
+    if (options.stickToBottom) {
+      window.requestAnimationFrame(() => {
+        list.scrollTop = list.scrollHeight;
+      });
+    }
+  }
+
+  function buildVideoHistoryRenderKey(items) {
+    if (!items.length) return `empty:${videoHistoryLoading ? "loading" : "ready"}`;
+    return items
+      .map((item) => [
+        getVideoHistoryItemKey(item),
+        item.url,
+        item.poster,
+        item.createdAt || item.discoveredAt,
+        item.nodeId
+      ].map((value) => String(value || "").replace(/[|\\]/g, "\\$&")).join("|"))
+      .join("\\n");
+  }
+
+  function renderVideoHistoryCard(item) {
+    const key = getVideoHistoryItemKey(item);
+    const unwatched = Boolean(item.watchKey && unreadVideoKeys.has(item.watchKey));
+    const liked = ownLikedKeys.has(item.nodeId);
+    const color = likedColors.get(item.nodeId) || DEFAULT_LIKE_COLOR;
+    return `
+      <article class="pixmax-canvas-cloner-video-history-card" data-key="${escapeHtmlAttribute(key)}" data-watch-key="${escapeHtmlAttribute(item.watchKey)}" data-node-id="${escapeHtmlAttribute(item.nodeId)}" data-unwatched="${unwatched ? "true" : "false"}">
+        <video data-src="${escapeHtmlAttribute(item.url)}" poster="${escapeHtmlAttribute(item.poster)}" controls playsinline preload="none"></video>
+        <div class="pixmax-canvas-cloner-video-history-meta">
+          <div class="pixmax-canvas-cloner-video-history-time">${escapeHtml(formatVideoHistoryTime(item.createdAt || item.discoveredAt))}</div>
+        </div>
+        <div class="pixmax-canvas-cloner-video-history-card-actions">
+          <button type="button" class="pixmax-canvas-cloner-video-history-like" data-video-history-action="like" data-liked="${liked ? "true" : "false"}" style="--pixmax-cloner-like-color: ${escapeHtmlAttribute(color)}" aria-label="收藏">${liked ? "♥" : "♡"}</button>
+          <button type="button" data-video-history-action="focus">定位到画布</button>
+          <button type="button" data-video-history-action="eagle">存入 Eagle</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function positionVideoHistoryPanel() {
+    const panel = document.getElementById(VIDEO_HISTORY_PANEL_ID);
+    if (!panel) return;
+    if (panel.dataset.embedded === "true") {
+      const container = findCanvasTabsContainer();
+      const tabRect = container?.getBoundingClientRect?.();
+      const shell = panel.parentElement !== document.body
+        ? panel.parentElement
+        : findVideoHistoryPanelShell(container, tabRect);
+      const shellRect = shell?.getBoundingClientRect?.();
+      if (!tabRect || !shellRect) return;
+      const top = Math.max(0, Math.round(tabRect.bottom - shellRect.top));
+      panel.style.setProperty("--pixmax-video-history-shell-top", `${top}px`);
+      panel.style.removeProperty("height");
+      return;
+    }
+    panel.style.removeProperty("height");
+    panel.style.removeProperty("--pixmax-video-history-shell-top");
+  }
+
+  function scheduleVideoHistoryPanelPositioning() {
+    if (videoHistoryPositionScheduled) return;
+    videoHistoryPositionScheduled = true;
+    videoHistoryPositionTimers = new Set();
+    window.requestAnimationFrame(() => positionVideoHistoryPanel());
+    for (const delay of [40, 120, 260, 520]) {
+      const timer = window.setTimeout(() => {
+        videoHistoryPositionTimers.delete(timer);
+        positionVideoHistoryPanel();
+        if (!videoHistoryPositionTimers.size) videoHistoryPositionScheduled = false;
+      }, delay);
+      videoHistoryPositionTimers.add(timer);
+    }
+  }
+
+  function findVideoHistoryPanelShell(container, tabRect) {
+    if (!container || !tabRect) return null;
+    let shell = container.parentElement;
+    let best = shell;
+    let bestScore = -Infinity;
+    while (shell && shell !== document.body) {
+      const rect = shell.getBoundingClientRect();
+      const style = getComputedStyle(shell);
+      if (
+        rect.width >= 260 &&
+        rect.height >= 320 &&
+        rect.left <= tabRect.left + 32 &&
+        rect.right >= tabRect.right - 24 &&
+        rect.top <= tabRect.top + 24
+      ) {
+        let score = 0;
+        if (hasVideoHistoryPanelCloseButton(shell, tabRect)) score += 12;
+        if (shell.querySelector?.("input, textarea")) score += 2;
+        if (style.borderRadius !== "0px") score += 4;
+        if (style.overflow !== "visible") score += 2;
+        if (style.position !== "static") score += 2;
+        if (rect.left <= 40) score += 2;
+        score -= Math.max(0, rect.width - 820) / 80;
+        score -= Math.abs(rect.left - Math.max(0, tabRect.left - 34)) / 120;
+        if (score > bestScore) {
+          bestScore = score;
+          best = shell;
+        }
+      }
+      shell = shell.parentElement;
+    }
+    return bestScore > -Infinity ? best : null;
+  }
+
+  function prepareVideoHistoryPanelShell(shell) {
+    if (!shell || shell.dataset.pixmaxVideoHistoryShell === "true") return;
+    shell.dataset.pixmaxVideoHistoryShell = "true";
+    const style = getComputedStyle(shell);
+    if (style.position === "static") {
+      shell.dataset.pixmaxVideoHistoryPosition = shell.style.position || "";
+      shell.style.position = "relative";
+    }
+  }
+
+  function hasVideoHistoryPanelCloseButton(shell, tabRect) {
+    if (!shell || !tabRect) return false;
+    return [...shell.querySelectorAll("button, [role='button'], div, span")]
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          element,
+          label: element.textContent?.trim() || element.getAttribute("aria-label") || "",
+          rect
+        };
+      })
+      .some(({ label, rect }) => (
+        (label === "×" || label === "关闭" || label.toLowerCase() === "close") &&
+        rect.width > 12 &&
+        rect.height > 12 &&
+        rect.top < tabRect.top &&
+        rect.left > tabRect.right
+      ));
+  }
+
+  function updateVideoHistoryEmbeddedContentVisibility() {
+    restoreVideoHistoryHiddenSiblings();
+  }
+
+  function restoreVideoHistoryHiddenSiblings() {
+    for (const element of document.querySelectorAll("[data-pixmax-video-history-hidden='true']")) {
+      element.style.display = element.dataset.pixmaxVideoHistoryDisplay || "";
+      delete element.dataset.pixmaxVideoHistoryHidden;
+      delete element.dataset.pixmaxVideoHistoryDisplay;
+    }
+  }
+
+  function hydrateVideoHistoryCards(root) {
+    for (const video of root.querySelectorAll("video")) {
+      if (!video.__pixmaxCanvasClonerVideoHistoryLazyBound) {
+        video.__pixmaxCanvasClonerVideoHistoryLazyBound = true;
+        video.addEventListener("pointerdown", () => loadVideoHistoryVideo(video), { passive: true });
+        video.addEventListener("keydown", (event) => {
+          if (event.key === " " || event.key === "Enter") loadVideoHistoryVideo(video);
+        });
+        video.addEventListener("play", () => {
+          loadVideoHistoryVideo(video);
+          markVideoHistoryItemWatchedFromElement(video);
+        });
+      }
+    }
+  }
+
+  function loadVideoHistoryVideo(video) {
+    if (!video || video.src) return;
+    const src = video.dataset.src || "";
+    if (!src) return;
+    video.src = src;
+    video.preload = "auto";
+    try {
+      video.load();
+    } catch {
+      // Native controls can retry loading on the next user gesture.
+    }
+  }
+
+  function handleVideoHistoryPanelClick(event) {
+    const action = event.target?.closest?.("[data-video-history-action]")?.dataset.videoHistoryAction;
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const card = event.target.closest(".pixmax-canvas-cloner-video-history-card");
+    const item = videoHistoryItems.find((candidate) => getVideoHistoryItemKey(candidate) === card?.dataset.key);
+    if (!item) return;
+    if (action === "focus") {
+      focusVideoHistoryItem(item);
+      return;
+    }
+    if (action === "eagle") {
+      importNodeAssetToEagle(item.nodeId, event.target.closest("button"));
+      return;
+    }
+    if (action === "like") {
+      toggleNodeLike(item.nodeId, event.target.closest("button"));
+    }
+  }
+
+  function handleVideoHistoryScroll(event) {
+    const list = event.currentTarget;
+    if (!list || list.scrollTop > 8 || videoHistoryVisibleCount >= videoHistoryItems.length) return;
+    const oldScrollHeight = list.scrollHeight;
+    videoHistoryVisibleCount = Math.min(videoHistoryItems.length, videoHistoryVisibleCount + VIDEO_HISTORY_PAGE_SIZE);
+    renderVideoHistoryPanel();
+    window.requestAnimationFrame(() => {
+      list.scrollTop = list.scrollHeight - oldScrollHeight + 8;
+    });
+  }
+
+  function updateVideoHistoryUnreadMarks() {
+    for (const card of document.querySelectorAll(".pixmax-canvas-cloner-video-history-card")) {
+      const watchKey = card.dataset.watchKey || "";
+      card.dataset.unwatched = watchKey && unreadVideoKeys.has(watchKey) ? "true" : "false";
+    }
+  }
+
+  function updateVideoHistoryLikeMarks() {
+    for (const card of document.querySelectorAll(".pixmax-canvas-cloner-video-history-card")) {
+      const nodeId = card.dataset.nodeId || "";
+      const button = card.querySelector('[data-video-history-action="like"]');
+      if (!button) continue;
+      setLikeButtonState(button, ownLikedKeys.has(nodeId), likedColors.get(nodeId));
+    }
+  }
+
+  function markVideoHistoryItemWatchedFromElement(video) {
+    const card = video?.closest?.(".pixmax-canvas-cloner-video-history-card");
+    const watchKey = card?.dataset.watchKey || "";
+    if (watchKey) {
+      markVideoWatched(watchKey);
+      updateVideoHistoryUnreadMarks();
+    }
+  }
+
+  async function focusVideoHistoryItem(item) {
+    if (!item?.nodeId) return;
+    const rect = normalizeVideoHistoryFocusRect(item.focusRect) || await readVideoHistoryFocusRect(item.nodeId);
+    if (rect && await centerFlowRectInCurrentCanvas(rect, 1.15, false)) {
+      highlightFocusedNode(item.nodeId);
+      return;
+    }
+    focusNode(item.nodeId);
+  }
+
+  async function readVideoHistoryFocusRect(nodeId) {
+    try {
+      const item = await requestBridge("get-node-like-asset", { nodeId }, 10000);
+      return normalizeVideoHistoryFocusRect(item?.focusRect);
+    } catch {
+      return null;
+    }
+  }
+
+  function normalizeVideoHistoryFocusRect(value) {
+    if (!value || typeof value !== "object") return null;
+    const rect = {
+      height: Number(value.height),
+      width: Number(value.width),
+      x: Number(value.x),
+      y: Number(value.y)
+    };
+    return [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) &&
+      rect.width > 0 &&
+      rect.height > 0
+      ? rect
+      : null;
+  }
+
+  async function centerFlowRectInCurrentCanvas(rect, targetScale = 1.15, smooth = true) {
+    const viewport = document.querySelector(".svelte-flow__viewport");
+    const pane = document.querySelector(".svelte-flow__pane") || document.querySelector(".svelte-flow");
+    if (!viewport || !pane) return false;
+    const paneRect = pane.getBoundingClientRect();
+    if (!paneRect.width || !paneRect.height) return false;
+    const current = getPerformanceViewport();
+    const zoom = Math.min(Math.max(Number(targetScale) || current.zoom || 1, 0.7), 1.6);
+    const nextX = paneRect.width / 2 - (rect.x + rect.width / 2) * zoom;
+    const nextY = paneRect.height / 2 - (rect.y + rect.height / 2) * zoom;
+    if (smooth) {
+      viewport.classList.add("pixmax-canvas-cloner-moving");
+      window.setTimeout(() => viewport.classList.remove("pixmax-canvas-cloner-moving"), 320);
+    }
+    viewport.style.transformOrigin = "0 0";
+    viewport.style.transform = `translate(${nextX}px, ${nextY}px) scale(${zoom})`;
+    const nextViewport = { x: nextX, y: nextY, zoom };
+    scheduleOfficialWorkflowViewportPersist(nextViewport, {
+      x: current.x,
+      y: current.y,
+      zoom: current.zoom
+    });
+    let bridgeApplied = false;
+    try {
+      const result = await requestBridge("set-flow-viewport", { rect, viewport: nextViewport }, 1600);
+      bridgeApplied = Boolean(result?.applied);
+    } catch {
+      // DOM transform below is still a useful fallback when the page internals are not captured.
+    }
+    if (bridgeApplied) {
+      window.setTimeout(() => scheduleOfficialWorkflowViewportPersist(nextViewport, nextViewport), 60);
+    }
+    window.dispatchEvent(new Event("resize"));
+    return true;
+  }
+
+  function highlightFocusedNode(nodeId) {
+    if (!nodeId) return;
+    window.setTimeout(() => {
+      const node = document.querySelector(`${NODE_SELECTOR}[data-id="${CSS.escape(nodeId)}"]`);
+      if (!node) return;
+      node.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          view: window
+        })
+      );
+      node.classList.add("pixmax-canvas-cloner-focus");
+      window.setTimeout(() => node.classList.remove("pixmax-canvas-cloner-focus"), 2600);
+      showToast("已定位到视频节点。");
+    }, 250);
+  }
+
+  async function refreshVideoHistory(options = {}) {
+    if (videoHistoryLoading && !options.force) return;
+    videoHistoryLoading = true;
+    if (videoHistoryOpen) renderVideoHistoryPanel(options);
+    try {
+      const previousKeys = new Set(videoHistoryItems.map(getVideoHistoryItemKey).filter(Boolean));
+      await loadCachedVideoHistory();
+      if (videoHistoryOpen) renderVideoHistoryPanel(options);
+      for (const item of videoHistoryItems) {
+        previousKeys.add(getVideoHistoryItemKey(item));
+      }
+      const result = await requestBridge("get-canvas-video-history", {}, 10000);
+      const incoming = Array.isArray(result?.items) ? result.items : [];
+      videoHistoryItems = mergeVideoHistoryItems(videoHistoryItems, incoming);
+      const newItems = videoHistoryItems.filter((item) => !previousKeys.has(getVideoHistoryItemKey(item)));
+      await writeVideoHistoryStore(videoHistoryItems);
+      if (videoHistoryHasLoadedOnce && newItems.length) {
+        showToast(newItems.length === 1 ? "视频生成完成，已加入视频列表。" : `${newItems.length} 个视频生成完成，已加入视频列表。`);
+        if (videoHistoryOpen) {
+          videoHistoryVisibleCount = Math.max(videoHistoryVisibleCount, VIDEO_HISTORY_PAGE_SIZE);
+          options.stickToBottom = true;
+        }
+      }
+      videoHistoryHasLoadedOnce = true;
+    } catch (error) {
+      if (videoHistoryOpen) showToast(error.message || "读取历史视频节点失败。", true);
+    } finally {
+      videoHistoryLoading = false;
+      if (videoHistoryOpen) renderVideoHistoryPanel(options);
+    }
+  }
+
+  function scheduleVideoHistoryRefresh(delay = 1200) {
+    window.clearTimeout(videoHistoryRefreshTimer);
+    videoHistoryRefreshTimer = window.setTimeout(() => {
+      refreshVideoHistory();
+    }, delay);
+  }
+
   function findCopyShareButton() {
     const candidates = getTopActionCandidates();
     const exact = candidates.find((candidate) => {
@@ -1098,15 +2005,31 @@
     button.disabled = true;
     try {
       const item = await requestBridge("get-selected-eagle-asset");
-      showToast("正在将素材存入 Eagle...");
-      const response = await requestExtension("eagle-import-url", { item });
-      if (!response?.ok) throw new Error(response?.error || "Eagle 导入失败。");
-      showToast(`已存入 Eagle：${response.name}`);
+      await importAssetToEagle(item);
     } catch (error) {
       showToast(error.message, true);
     } finally {
       button.disabled = false;
     }
+  }
+
+  async function importNodeAssetToEagle(nodeId, button) {
+    if (button) button.disabled = true;
+    try {
+      const item = await requestBridge("get-node-eagle-asset", { nodeId });
+      await importAssetToEagle(item);
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function importAssetToEagle(item) {
+    showToast("正在将素材存入 Eagle...");
+    const response = await requestExtension("eagle-import-url", { item });
+    if (!response?.ok) throw new Error(response?.error || "Eagle 导入失败。");
+    showToast(`已存入 Eagle：${response.name}`);
   }
 
   function getStorageArea() {
@@ -1399,12 +2322,16 @@
     if (!video || String(video.tagName || "").toLowerCase() !== "video") return;
     const watchKey = getElementVideoWatchKey(video) || getNodeVideoWatchKey(video.closest?.(NODE_SELECTOR));
     markVideoWatched(watchKey);
+    markVideoHistoryItemWatchedFromElement(video);
   }
 
   function handleVideoMetadata(event) {
     const video = event.target;
     if (!video || String(video.tagName || "").toLowerCase() !== "video") return;
     applyNodeUnwatchedVideoState(video.closest?.(NODE_SELECTOR));
+    if (video.closest?.(NODE_SELECTOR)) {
+      scheduleVideoHistoryRefresh(900);
+    }
   }
 
   function getCurrentFileUuid() {
@@ -2803,7 +3730,13 @@
     button.title = liked
       ? "Remove this Pixmax result from local Likes"
       : "Save this Pixmax result to local Likes";
-    if (liked) setElementLikeColor(button, color);
+    if (liked) {
+      setElementLikeColor(button, color);
+    } else {
+      button.style.removeProperty("--pixmax-cloner-like-color");
+      button.style.removeProperty("--pixmax-cloner-like-glow");
+      button.style.removeProperty("--pixmax-cloner-like-glow-strong");
+    }
   }
 
   function applyNodeElementLikedState(node, liked, color = DEFAULT_LIKE_COLOR) {
@@ -2840,6 +3773,7 @@
     for (const toolbar of document.querySelectorAll(TOOLBAR_SELECTOR)) {
       applyToolbarLikedState(toolbar);
     }
+    updateVideoHistoryLikeMarks();
   }
 
   function applyLikedMarksInRoot(root) {
@@ -2932,7 +3866,7 @@
 
     viewport.style.transformOrigin = "0 0";
     viewport.style.transform = `translate(${nextX}px, ${nextY}px) scale(${targetScale})`;
-    persistOfficialWorkflowViewport({
+    scheduleOfficialWorkflowViewportPersist({
       x: nextX,
       y: nextY,
       zoom: targetScale
@@ -2990,6 +3924,25 @@
     }
   }
 
+  function cancelPendingOfficialWorkflowViewportPersist() {
+    for (const timer of officialViewportPersistTimers) {
+      window.clearTimeout(timer);
+    }
+    officialViewportPersistTimers = new Set();
+  }
+
+  function scheduleOfficialWorkflowViewportPersist(viewport, previousViewport) {
+    cancelPendingOfficialWorkflowViewportPersist();
+    persistOfficialWorkflowViewport(viewport, previousViewport);
+    for (const delay of [80, 260]) {
+      const timer = window.setTimeout(() => {
+        officialViewportPersistTimers.delete(timer);
+        persistOfficialWorkflowViewport(viewport, previousViewport);
+      }, delay);
+      officialViewportPersistTimers.add(timer);
+    }
+  }
+
   function clearFocusParam() {
     try {
       const url = new URL(location.href);
@@ -3017,6 +3970,9 @@
     }
 
     centerNodeInFlow(node, false);
+    clearFocusParam();
+    window.dispatchEvent(new CustomEvent(FOCUS_COMPLETE_EVENT));
+    document.dispatchEvent(new CustomEvent(FOCUS_COMPLETE_EVENT));
     window.setTimeout(() => {
       node.dispatchEvent(
         new MouseEvent("click", {
@@ -3028,7 +3984,6 @@
       node.classList.add("pixmax-canvas-cloner-focus");
       window.setTimeout(() => node.classList.remove("pixmax-canvas-cloner-focus"), 2600);
       showToast("Focused liked Pixmax result.");
-      window.setTimeout(clearFocusParam, 1200);
     }, 300);
   }
 
@@ -3118,9 +4073,26 @@
   }
 
   async function toggleSelectedLike(button) {
-    button.disabled = true;
     try {
       const item = await requestBridge("get-selected-like-asset");
+      await toggleLikeItem(item, button);
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  }
+
+  async function toggleNodeLike(nodeId, button) {
+    try {
+      const item = await requestBridge("get-node-like-asset", { nodeId });
+      await toggleLikeItem(item, button);
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  }
+
+  async function toggleLikeItem(item, button) {
+    if (button) button.disabled = true;
+    try {
       const likeKey = getLikeKey(item);
       if (!likeKey) throw new Error("Selected Pixmax item has no stable Like key.");
 
@@ -3147,8 +4119,9 @@
             ownLikedKeys.delete(likeKey);
             likedColors.delete(likeKey);
           }
-          setLikeButtonState(button, result.liked, sharedOptions.color);
+          if (button) setLikeButtonState(button, result.liked, sharedOptions.color);
           applyNodeLikedState(item.nodeId, result.liked, sharedOptions.color);
+          updateVideoHistoryLikeMarks();
           window.setTimeout(refreshLikedState, 2200);
         } else {
           const allKeys = Array.isArray(result.allKeys)
@@ -3160,7 +4133,7 @@
           likedKeys = new Set(allKeys);
           ownLikedKeys = new Set(ownKeys);
           likedColors = buildColorMap(result);
-          setLikeButtonState(button, ownLikedKeys.has(likeKey), likedColors.get(likeKey));
+          if (button) setLikeButtonState(button, ownLikedKeys.has(likeKey), likedColors.get(likeKey));
           applyVisibleLikedMarks();
         }
         showToast(result.liked ? "Added to shared Likes." : "Removed from shared Likes.");
@@ -3177,8 +4150,9 @@
         likedKeys.delete(likeKey);
         ownLikedKeys.delete(likeKey);
         likedColors.delete(likeKey);
-        setLikeButtonState(button, false);
+        if (button) setLikeButtonState(button, false);
         applyNodeLikedState(item.nodeId, false);
+        updateVideoHistoryLikeMarks();
         showToast("Removed from Likes.");
         window.setTimeout(maybeRemindAboutUpdate, 800);
         return;
@@ -3194,14 +4168,13 @@
       likedKeys.add(likeKey);
       ownLikedKeys.add(likeKey);
       likedColors.set(likeKey, DEFAULT_LIKE_COLOR);
-      setLikeButtonState(button, true, DEFAULT_LIKE_COLOR);
+      if (button) setLikeButtonState(button, true, DEFAULT_LIKE_COLOR);
       applyNodeLikedState(item.nodeId, true, DEFAULT_LIKE_COLOR);
+      updateVideoHistoryLikeMarks();
       showToast("Added to Likes.");
       window.setTimeout(maybeRemindAboutUpdate, 800);
-    } catch (error) {
-      showToast(error.message, true);
     } finally {
-      button.disabled = false;
+      if (button) button.disabled = false;
     }
   }
 
@@ -3405,7 +4378,10 @@
 
   function scheduleOpenLikesButtonRetries() {
     for (const delay of [250, 800, 1600, 3200]) {
-      window.setTimeout(ensureOpenLikesButton, delay);
+      window.setTimeout(() => {
+        ensureOpenLikesButton();
+        ensureVideoHistoryEntry();
+      }, delay);
     }
   }
 
@@ -3414,8 +4390,12 @@
     cleanupLegacyCanvasUi();
     ensureStyle();
     ensureTopActionButtons();
+    ensureVideoHistoryEntry();
     scheduleOpenLikesButtonRetries();
     loadPerformanceModeSetting();
+    loadCachedVideoHistory()
+      .then(() => renderVideoHistoryPanel())
+      .catch(() => {});
     refreshLikedState();
     syncLiveCollabState();
     focusNode(getFocusNodeId());
@@ -3428,6 +4408,7 @@
         ownLikedKeys = new Set(items.map(getLikeKey).filter(Boolean));
         likedColors = buildColorMap({ allItems: items });
         applyVisibleLikedMarks();
+        updateVideoHistoryLikeMarks();
       }
       if (areaName === "local" && changes[PERFORMANCE_MODE_STORAGE_KEY]) {
         setPerformanceModeEnabled(Boolean(changes[PERFORMANCE_MODE_STORAGE_KEY].newValue), {
@@ -3437,6 +4418,7 @@
       if (areaName === "local" && changes[WATCHED_VIDEO_STORAGE_KEY]) {
         watchedVideoKeys = new Set(normalizeWatchedVideoKeys(changes[WATCHED_VIDEO_STORAGE_KEY].newValue));
         applyVisibleUnwatchedVideoMarks();
+        updateVideoHistoryUnreadMarks();
       }
       if (areaName === "local" && (changes.pixmaxKnownVideoKeys || changes.pixmaxUnreadVideoKeys)) {
         if (changes.pixmaxKnownVideoKeys) {
@@ -3446,6 +4428,14 @@
           unreadVideoKeys = new Set(normalizeWatchedVideoKeys(changes.pixmaxUnreadVideoKeys.newValue));
         }
         applyVisibleUnwatchedVideoMarks();
+        updateVideoHistoryUnreadMarks();
+      }
+      if (areaName === "local" && changes[VIDEO_HISTORY_STORAGE_KEY]) {
+        loadCachedVideoHistory()
+          .then(() => {
+            if (videoHistoryOpen) renderVideoHistoryPanel();
+          })
+          .catch(() => {});
       }
       if (
         areaName === "sync" &&
@@ -3475,7 +4465,10 @@
     document.addEventListener("keydown", () => schedulePerformanceUpdate(0), true);
     document.addEventListener("keyup", () => schedulePerformanceUpdate(0), true);
     window.addEventListener("wheel", handlePerformanceWheel, { passive: true, capture: true });
-    window.addEventListener("resize", () => schedulePerformanceUpdate(0));
+    window.addEventListener("resize", () => {
+      schedulePerformanceUpdate(0);
+      if (videoHistoryOpen) scheduleVideoHistoryPanelPositioning();
+    });
     window.addEventListener("focus", refreshWatchedVideoState);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") refreshWatchedVideoState();
@@ -3494,9 +4487,27 @@
     new MutationObserver((mutations) => {
       scheduleLegacyCleanup();
       ensureTopActionButtons();
+      scheduleVideoHistoryEntrySync();
+      if (videoHistoryOpen) scheduleVideoHistoryPanelPositioning();
       autoResolveCollaborationConflict();
       scheduleOfficialPresenceAppearance();
       neutralizeOfficialFocusColors();
+      for (const mutation of mutations) {
+        if (mutation.type !== "childList") continue;
+        const addedElements = [...mutation.addedNodes].filter((node) => node.nodeType === Node.ELEMENT_NODE);
+        if (
+          addedElements.some((element) =>
+            !element.closest?.(`#${VIDEO_HISTORY_PANEL_ID}`) &&
+            (
+              element.matches?.(`${NODE_SELECTOR}, video`) ||
+              element.querySelector?.(`${NODE_SELECTOR}, video`)
+            )
+          )
+        ) {
+          scheduleVideoHistoryRefresh(videoHistoryOpen ? 1400 : 2600);
+          break;
+        }
+      }
       if (performanceModeEnabled) {
         let shouldRefreshPerformance = false;
         for (const mutation of mutations) {

@@ -8,10 +8,12 @@
   const FOCUS_PARAM = "pixmaxClonerFocus";
   const FOCUS_RECT_PARAM = "pixmaxClonerFocusRect";
   const FOCUS_ZOOM_PARAM = "pixmaxClonerFocusZoom";
+  const FOCUS_COMPLETE_EVENT = "pixmax-canvas-cloner:focus-complete";
   const OFFICIAL_VIEWPORT_STORAGE_PREFIX = "pixmax.genNodeHabit.v1:";
   let earlyFocusViewportSeed = buildEarlyFocusViewportSeedFromUrl();
 
   installOfficialViewportSeedPatch();
+  installFocusViewportSeedCleanup();
   if (earlyFocusViewportSeed) {
     persistEarlyFocusViewportSeed(earlyFocusViewportSeed);
     scheduleEarlyFocusViewportSeedExpiry(earlyFocusViewportSeed);
@@ -24,6 +26,8 @@
       installed: true,
       candidates: [],
       controllers: [],
+      flowControllers: [],
+      flowCandidates: [],
       presenceSockets: [],
       presenceMessages: [],
       peerCount: 1,
@@ -52,6 +56,42 @@
     }
 
     internals.remember = remember;
+
+    function rememberFlowController(value, source) {
+      if (!value || typeof value !== "object") return;
+      const keys = Object.getOwnPropertyNames(value);
+      const hasViewportMethod = [
+        "setViewport",
+        "setCenter",
+        "fitView",
+        "zoomTo",
+        "project",
+        "screenToFlowPosition"
+      ].some((key) => typeof value[key] === "function");
+      const hasViewportStore =
+        value.viewport?.set ||
+        value.viewport?.update ||
+        value.transform?.set ||
+        value.store?.setState;
+      if (!hasViewportMethod && !hasViewportStore) return;
+      if (!internals.flowControllers.includes(value)) internals.flowControllers.push(value);
+      internals.flowCandidates.push({
+        foundAt: Date.now(),
+        source,
+        keys: keys.slice(0, 80)
+      });
+      if (internals.flowCandidates.length > 30) internals.flowCandidates.shift();
+    }
+
+    function maybeRememberFlowController(value, source) {
+      if (!value || typeof value !== "object") return;
+      rememberFlowController(value, source);
+      for (const key of ["store", "reactFlow", "flow", "svelteFlow", "viewport", "view"]) {
+        if (value[key] && typeof value[key] === "object") {
+          rememberFlowController(value[key], `${source}.${key}`);
+        }
+      }
+    }
 
     function maybeRememberWorkspaceController(value, source) {
       if (internals.workspaceController) return;
@@ -237,7 +277,7 @@
             if (internals.mapProbeInteresting.length > 20) internals.mapProbeInteresting.shift();
           }
           maybeRememberWorkspaceController(value, "svelte-context-map");
-          if (internals.workspaceController) restoreMapSet();
+          maybeRememberFlowController(value, "svelte-context-map");
         } catch {
           // Keep Map.set transparent.
         }
@@ -245,8 +285,56 @@
       };
       patchedMapSet.__pixmaxHubLiveTargetedProbe = true;
       Map.prototype.set = patchedMapSet;
-      window.setTimeout(restoreMapSet, 15000);
+      window.setTimeout(restoreMapSet, 60000);
     }
+
+    internals.setFlowViewport = (payload = {}) => {
+      const viewport = payload.viewport || {};
+      const rect = payload.rect || {};
+      const x = Number(viewport.x);
+      const y = Number(viewport.y);
+      const zoom = Number(viewport.zoom);
+      if (![x, y, zoom].every(Number.isFinite)) return false;
+      let applied = false;
+      for (const controller of internals.flowControllers) {
+        try {
+          if (typeof controller.setViewport === "function") {
+            controller.setViewport({ x, y, zoom }, { duration: 0 });
+            applied = true;
+          }
+          if (typeof controller.setCenter === "function" && Number.isFinite(Number(rect.x))) {
+            controller.setCenter(
+              Number(rect.x) + Number(rect.width || 0) / 2,
+              Number(rect.y) + Number(rect.height || 0) / 2,
+              { duration: 0, zoom }
+            );
+            applied = true;
+          }
+          if (controller.viewport?.set) {
+            controller.viewport.set({ x, y, zoom });
+            applied = true;
+          }
+          if (controller.viewport?.update) {
+            controller.viewport.update((current) => ({ ...(current || {}), x, y, zoom }));
+            applied = true;
+          }
+          if (controller.transform?.set) {
+            controller.transform.set([x, y, zoom]);
+            applied = true;
+          }
+          if (controller.store?.setState) {
+            controller.store.setState({
+              transform: [x, y, zoom],
+              viewport: { x, y, zoom }
+            });
+            applied = true;
+          }
+        } catch {
+          // Try the next captured flow controller.
+        }
+      }
+      return applied;
+    };
   }
 
   installLiveInternalsProbe();
@@ -356,6 +444,32 @@
       }
       return originalSetItem.call(this, key, value);
     };
+  }
+
+  function installFocusViewportSeedCleanup() {
+    if (window.__pixmaxCanvasClonerViewportSeedCleanup) return;
+    window.__pixmaxCanvasClonerViewportSeedCleanup = true;
+    const clearSeed = () => {
+      earlyFocusViewportSeed = null;
+    };
+    window.addEventListener(FOCUS_COMPLETE_EVENT, clearSeed);
+    document.addEventListener(FOCUS_COMPLETE_EVENT, clearSeed);
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest(".svelte-flow")) clearSeed();
+      },
+      true
+    );
+    window.addEventListener(
+      "wheel",
+      (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest(".svelte-flow")) clearSeed();
+      },
+      { passive: true, capture: true }
+    );
   }
 
   function shouldApplyEarlyFocusViewportSeed(key) {
@@ -1570,26 +1684,7 @@
     };
   }
 
-  async function getSelectedEagleAsset() {
-    const selectedIds = getSelectedNodeIds();
-    if (selectedIds.length !== 1) {
-      throw new Error("请只选中一个素材节点，再点击存入 Eagle。");
-    }
-
-    const canvas = await fetchCurrentCanvas();
-    const rawNodes = canvas.nodes ?? [];
-    return buildEagleAsset(rawNodes, selectedIds[0]);
-  }
-
-  async function getSelectedLikeAsset() {
-    const selectedIds = getSelectedNodeIds();
-    if (selectedIds.length !== 1) {
-      throw new Error("Please select one generated Pixmax result before clicking Like.");
-    }
-
-    const [nodeId] = selectedIds;
-    const canvas = await fetchCurrentCanvas();
-    const rawNodes = canvas.nodes ?? [];
+  function buildLikeAsset(rawNodes, nodeId) {
     const rawNode = rawNodes.find((node) => node.uuid === nodeId);
     const url = resolveAssetUrl(rawNode?.defaultAsset);
     const fallback = getDomAssetFallback(nodeId);
@@ -1611,6 +1706,109 @@
       url: url || fallback.url,
       website: location.href
     };
+  }
+
+  function getRawNodeHistoryTime(rawNode) {
+    const asset = rawNode?.defaultAsset || {};
+    const metaData = parseMetaData(rawNode);
+    const candidates = [
+      rawNode?.createdAt,
+      rawNode?.createTime,
+      rawNode?.createdTime,
+      rawNode?.updatedAt,
+      rawNode?.updateTime,
+      rawNode?.generatedAt,
+      asset?.createdAt,
+      asset?.createTime,
+      asset?.updatedAt,
+      asset?.updateTime,
+      metaData?.createdAt,
+      metaData?.updatedAt,
+      metaData?.data?.createdAt,
+      metaData?.data?.updatedAt
+    ];
+    for (const value of candidates) {
+      const time = Date.parse(String(value || ""));
+      if (Number.isFinite(time)) return new Date(time).toISOString();
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 1000000000) {
+        return new Date(numeric > 100000000000 ? numeric : numeric * 1000).toISOString();
+      }
+    }
+    return "";
+  }
+
+  async function getCanvasVideoHistory() {
+    const canvas = await fetchCurrentCanvas();
+    const rawNodes = canvas.nodes ?? [];
+    const fileUuid = getCanvasIdentity().fileUuid;
+    const items = [];
+
+    rawNodes.forEach((rawNode, index) => {
+      const url = resolveAssetUrl(rawNode?.defaultAsset);
+      if (inferAssetMediaType(rawNode?.defaultAsset, url) !== "video") return;
+      const watchKey = getRawNodeVideoWatchKey(rawNode);
+      items.push({
+        assetUuid: getAssetUuid(rawNode?.defaultAsset),
+        createdAt: getRawNodeHistoryTime(rawNode),
+        downloadCode: buildDownloadCode(rawNode?.defaultAsset, rawNode.uuid),
+        fileUuid,
+        focusRect: getRawNodeFocusRect(rawNode),
+        index,
+        name: getNodeLabel(rawNode) || "视频生成节点",
+        nodeId: rawNode.uuid,
+        poster: resolveAssetPreviewUrl(rawNode?.defaultAsset),
+        prompt: getPromptText(rawNode),
+        url,
+        watchKey
+      });
+    });
+
+    return {
+      fileUuid,
+      items: items.sort((first, second) => {
+        const firstTime = Date.parse(first.createdAt || "") || 0;
+        const secondTime = Date.parse(second.createdAt || "") || 0;
+        if (firstTime !== secondTime) return firstTime - secondTime;
+        return first.index - second.index;
+      })
+    };
+  }
+
+  async function getSelectedEagleAsset() {
+    const selectedIds = getSelectedNodeIds();
+    if (selectedIds.length !== 1) {
+      throw new Error("请只选中一个素材节点，再点击存入 Eagle。");
+    }
+
+    const canvas = await fetchCurrentCanvas();
+    const rawNodes = canvas.nodes ?? [];
+    return buildEagleAsset(rawNodes, selectedIds[0]);
+  }
+
+  async function getNodeEagleAsset(payload = {}) {
+    const nodeId = String(payload.nodeId || "").trim();
+    if (!nodeId) throw new Error("缺少要导入 Eagle 的节点。");
+    const canvas = await fetchCurrentCanvas();
+    return buildEagleAsset(canvas.nodes ?? [], nodeId);
+  }
+
+  async function getSelectedLikeAsset() {
+    const selectedIds = getSelectedNodeIds();
+    if (selectedIds.length !== 1) {
+      throw new Error("Please select one generated Pixmax result before clicking Like.");
+    }
+
+    const [nodeId] = selectedIds;
+    const canvas = await fetchCurrentCanvas();
+    return buildLikeAsset(canvas.nodes ?? [], nodeId);
+  }
+
+  async function getNodeLikeAsset(payload = {}) {
+    const nodeId = String(payload.nodeId || "").trim();
+    if (!nodeId) throw new Error("缺少要收藏的节点。");
+    const canvas = await fetchCurrentCanvas();
+    return buildLikeAsset(canvas.nodes ?? [], nodeId);
   }
 
   function addAdjacencyConnection(adjacency, sourceId, targetId) {
@@ -2032,8 +2230,32 @@
         return;
       }
 
+      if (action === "get-node-eagle-asset") {
+        respond(requestId, true, await getNodeEagleAsset(payload));
+        return;
+      }
+
       if (action === "get-selected-like-asset") {
         respond(requestId, true, await getSelectedLikeAsset());
+        return;
+      }
+
+      if (action === "get-node-like-asset") {
+        respond(requestId, true, await getNodeLikeAsset(payload));
+        return;
+      }
+
+      if (action === "get-canvas-video-history") {
+        respond(requestId, true, await getCanvasVideoHistory());
+        return;
+      }
+
+      if (action === "set-flow-viewport") {
+        const internals = window[LIVE_INTERNALS_KEY];
+        respond(requestId, true, {
+          applied: Boolean(internals?.setFlowViewport?.(payload)),
+          candidateCount: internals?.flowControllers?.length || 0
+        });
         return;
       }
 
