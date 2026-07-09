@@ -9,18 +9,22 @@
   const NODE_SELECTOR = ".svelte-flow__node[data-id]";
   const TOOLBAR_SELECTOR = ".svelte-flow__node-toolbar";
   const FOCUS_PARAM = "pixmaxClonerFocus";
+  const FOCUS_RECT_PARAM = "pixmaxClonerFocusRect";
+  const FOCUS_ZOOM_PARAM = "pixmaxClonerFocusZoom";
   const ACTIONS_CLASS = "pixmax-canvas-cloner-actions";
   const CONTEXT_PASTE_CLASS = "pixmax-canvas-cloner-context-paste";
   const STYLE_ID = "pixmax-canvas-cloner-style";
   const OFFICIAL_FOCUS_STYLE_ID = "collab-remote-focus-styles";
   const LIVE_FOCUS_STYLE_ID = "pixmax-canvas-cloner-live-focus-colors";
   const LIVE_SELECTION_STYLE_ID = "pixmax-canvas-cloner-live-selection-color";
-  const STYLE_VERSION = "1.4.8";
+  const STYLE_VERSION = "1.4.17";
   const TOAST_ID = "pixmax-canvas-cloner-toast";
   const LIVE_TOGGLE_ID = "pixmax-canvas-cloner-live-toggle";
   const OPEN_LIKES_BUTTON_ID = "pixmax-canvas-cloner-open-likes";
+  const PERFORMANCE_BUTTON_ID = "pixmax-canvas-cloner-performance-toggle";
   const LIVE_CURSOR_LAYER_ID = "pixmax-canvas-cloner-live-cursors";
   const LIKES_STORAGE_KEY = "pixmaxLikedItems";
+  const PERFORMANCE_MODE_STORAGE_KEY = "pixmaxCanvasPerformanceMode";
   const WATCHED_VIDEO_STORAGE_KEY = "pixmaxWatchedVideoKeys";
   const WATCHED_VIDEO_CANVAS_BASELINES_KEY = "pixmaxWatchedVideoCanvasBaselines";
   const KNOWN_VIDEO_CANVAS_MODEL_KEY = "pixmaxKnownVideoCanvasModelAt";
@@ -70,6 +74,22 @@
   let toolbarSyncScheduled = false;
   let contextPasteSyncScheduled = false;
   let legacyCleanupScheduled = false;
+  let performanceModeEnabled = false;
+  let performanceUpdateScheduled = false;
+  let performanceUpdateTimer = 0;
+  let performanceRefreshInterval = 0;
+  let performanceInteractionTimer = 0;
+  let performancePointerDownInFlow = false;
+  let performanceCanvasIsMoving = false;
+  let canvasNodeDragActive = false;
+  let performanceCacheDirty = true;
+  let performanceNodesCache = [];
+  let performanceEdgesCache = [];
+  let performanceEdgeEndpoints = new WeakMap();
+  let performanceNodeRects = new WeakMap();
+  let performanceSelectedNodeIds = new Set();
+  let performanceLastSignature = "";
+  let performanceLastEdgeSignature = "";
   let toastTimer = 0;
   let lastContextMenuPoint = null;
   let liveReconnectTimer = 0;
@@ -421,6 +441,16 @@
       #${OPEN_LIKES_BUTTON_ID} {
         cursor: pointer;
       }
+      #${PERFORMANCE_BUTTON_ID},
+      #${OPEN_LIKES_BUTTON_ID} {
+        cursor: pointer;
+      }
+      #${PERFORMANCE_BUTTON_ID}[data-active="true"] {
+        border-color: #75e9f4 !important;
+        color: #75e9f4 !important;
+        box-shadow: 0 0 0 1px rgb(117 233 244 / 25%), 0 10px 30px rgb(0 0 0 / 35%);
+      }
+      #${PERFORMANCE_BUTTON_ID} svg,
       #${OPEN_LIKES_BUTTON_ID} svg {
         fill: none;
         color: inherit;
@@ -430,30 +460,101 @@
         stroke-linejoin: round;
         stroke-width: 1.75;
       }
+      #${PERFORMANCE_BUTTON_ID} svg:not([class]),
       #${OPEN_LIKES_BUTTON_ID} svg:not([class]) {
         width: 24px;
         height: 24px;
+      }
+      html.pixmax-canvas-cloner-performance-mode .svelte-flow__edge[aria-label] {
+        display: none !important;
+        pointer-events: none !important;
+      }
+      html.pixmax-canvas-cloner-performance-mode .svelte-flow__edge[aria-label].pixmax-canvas-cloner-perf-visible-edge {
+        display: inline !important;
+        pointer-events: auto !important;
+      }
+      html.pixmax-canvas-cloner-performance-mode.pixmax-canvas-cloner-node-dragging .svelte-flow__edge[aria-label].pixmax-canvas-cloner-perf-visible-edge {
+        display: none !important;
+        pointer-events: none !important;
+      }
+      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR} {
+        content-visibility: auto;
+        contain: layout style paint !important;
+        contain-intrinsic-size: 360px 280px !important;
+      }
+      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}.pixmax-canvas-cloner-perf-offscreen-node {
+        display: block !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        content-visibility: auto !important;
+        contain: layout style paint !important;
+        contain-intrinsic-size: 360px 280px !important;
+      }
+      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}.pixmax-canvas-cloner-perf-onscreen-node,
+      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}.selected,
+      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}[aria-selected="true"],
+      html.pixmax-canvas-cloner-performance-mode ${NODE_SELECTOR}[data-selected="true"] {
+        display: block !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        content-visibility: visible !important;
       }
     `;
     document.head.appendChild(style);
   }
 
-  function ensureOpenLikesButton() {
+  function ensureTopActionButtons() {
     const target = findCopyShareButton();
     if (!target?.parentElement) {
       document.getElementById(OPEN_LIKES_BUTTON_ID)?.remove();
+      document.getElementById(PERFORMANCE_BUTTON_ID)?.remove();
       return;
     }
 
     const sourceClass = target.getAttribute("class") || "";
-    let button = document.getElementById(OPEN_LIKES_BUTTON_ID);
-    if (!button || button.dataset.pixmaxSourceClass !== sourceClass) {
-      button?.remove();
-      button = createOpenLikesButton(target, sourceClass);
+    let performanceButton = document.getElementById(PERFORMANCE_BUTTON_ID);
+    if (!performanceButton || performanceButton.dataset.pixmaxSourceClass !== sourceClass) {
+      performanceButton?.remove();
+      performanceButton = createPerformanceButton(target, sourceClass);
     }
-    if (button.nextElementSibling !== target) {
-      target.parentElement.insertBefore(button, target);
+    let likesButton = document.getElementById(OPEN_LIKES_BUTTON_ID);
+    if (!likesButton || likesButton.dataset.pixmaxSourceClass !== sourceClass) {
+      likesButton?.remove();
+      likesButton = createOpenLikesButton(target, sourceClass);
     }
+    updatePerformanceButton();
+    if (likesButton.nextElementSibling !== target) {
+      target.parentElement.insertBefore(likesButton, target);
+    }
+    if (performanceButton.nextElementSibling !== likesButton) {
+      target.parentElement.insertBefore(performanceButton, likesButton);
+    }
+  }
+
+  function ensureOpenLikesButton() {
+    ensureTopActionButtons();
+  }
+
+  function createPerformanceButton(target, sourceClass) {
+    const button = target.cloneNode(false);
+    button.id = PERFORMANCE_BUTTON_ID;
+    button.dataset.pixmaxSourceClass = sourceClass || "";
+    if (button instanceof HTMLButtonElement) button.type = "button";
+    button.removeAttribute("href");
+    button.removeAttribute("target");
+    button.removeAttribute("rel");
+    button.removeAttribute("disabled");
+    button.removeAttribute("aria-disabled");
+    button.querySelectorAll?.("[id]").forEach((element) => element.removeAttribute("id"));
+    button.title = "开启画布性能模式：隐藏非选中连线和离屏节点";
+    button.setAttribute("aria-label", "开启画布性能模式");
+    button.innerHTML = createPerformanceSvg(target);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setPerformanceModeEnabled(!performanceModeEnabled, { persist: true, toast: true });
+    });
+    return button;
   }
 
   function createOpenLikesButton(target, sourceClass) {
@@ -480,6 +581,16 @@
     return button;
   }
 
+  function createPerformanceSvg(target) {
+    const nativeSvgClass = target.querySelector?.("svg")?.getAttribute("class") || "";
+    const classAttribute = nativeSvgClass ? ` class="${escapeHtmlAttribute(nativeSvgClass)}"` : "";
+    return `
+      <svg${classAttribute} viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M13 2 4.8 13.1h6.4L10 22l9.2-12.2h-6.5L13 2Z"/>
+      </svg>
+    `;
+  }
+
   function createOpenLikesHeartSvg(target) {
     const nativeSvgClass = target.querySelector?.("svg")?.getAttribute("class") || "";
     const classAttribute = nativeSvgClass ? ` class="${escapeHtmlAttribute(nativeSvgClass)}"` : "";
@@ -488,6 +599,361 @@
         <path d="M12 20.1S5.2 16.2 5.2 10.3a3.7 3.7 0 0 1 6.5-2.4l.3.4.3-.4a3.7 3.7 0 0 1 6.5 2.4c0 5.9-6.8 9.8-6.8 9.8Z"/>
       </svg>
     `;
+  }
+
+  function updatePerformanceButton() {
+    const button = document.getElementById(PERFORMANCE_BUTTON_ID);
+    if (!button) return;
+    button.dataset.active = performanceModeEnabled ? "true" : "false";
+    button.title = performanceModeEnabled
+      ? "关闭画布性能模式"
+      : "开启画布性能模式：隐藏非选中连线和离屏节点";
+    button.setAttribute(
+      "aria-label",
+      performanceModeEnabled ? "关闭画布性能模式" : "开启画布性能模式"
+    );
+  }
+
+  function setPerformanceModeEnabled(enabled, options = {}) {
+    performanceModeEnabled = Boolean(enabled);
+    document.documentElement.classList.toggle(
+      "pixmax-canvas-cloner-performance-mode",
+      performanceModeEnabled
+    );
+    updatePerformanceButton();
+    if (performanceModeEnabled) {
+      startPerformanceMode();
+      schedulePerformanceUpdate(0);
+    } else {
+      stopPerformanceMode();
+      clearPerformanceModeMarks();
+    }
+    if (options.persist) {
+      storageSet({ [PERFORMANCE_MODE_STORAGE_KEY]: performanceModeEnabled }).catch(() => {});
+    }
+    if (options.toast) {
+      showToast(performanceModeEnabled ? "画布性能模式已开启。" : "画布性能模式已关闭。");
+    }
+  }
+
+  async function loadPerformanceModeSetting() {
+    try {
+      const result = await storageGet({ [PERFORMANCE_MODE_STORAGE_KEY]: false });
+      setPerformanceModeEnabled(Boolean(result[PERFORMANCE_MODE_STORAGE_KEY]), { persist: false });
+    } catch {
+      updatePerformanceButton();
+    }
+  }
+
+  function startPerformanceMode() {
+    if (performanceRefreshInterval) return;
+    performanceNodeRects = new WeakMap();
+    markPerformanceCacheDirty();
+    performanceLastSignature = "";
+    performanceLastEdgeSignature = "";
+    clearPerformanceModeMarks();
+    updatePerformanceMode();
+    performanceRefreshInterval = window.setInterval(() => {
+      updatePerformanceMode();
+    }, 100);
+  }
+
+  function stopPerformanceMode() {
+    performanceNodeRects = new WeakMap();
+    performanceNodesCache = [];
+    performanceEdgesCache = [];
+    performanceEdgeEndpoints = new WeakMap();
+    performanceCacheDirty = true;
+    performanceSelectedNodeIds = new Set();
+    performanceLastSignature = "";
+    performanceLastEdgeSignature = "";
+    window.clearInterval(performanceRefreshInterval);
+    window.clearTimeout(performanceUpdateTimer);
+    window.clearTimeout(performanceInteractionTimer);
+    performanceRefreshInterval = 0;
+    performanceUpdateTimer = 0;
+    performanceInteractionTimer = 0;
+    performanceUpdateScheduled = false;
+    performancePointerDownInFlow = false;
+    setCanvasNodeDragState(false);
+    setPerformanceMovingState(false);
+    setPerformanceCompactState(false);
+  }
+
+  function clearPerformanceModeMarks() {
+    for (const edge of document.querySelectorAll(".pixmax-canvas-cloner-perf-visible-edge")) {
+      edge.classList.remove("pixmax-canvas-cloner-perf-visible-edge");
+    }
+    for (const media of document.querySelectorAll(
+      ".pixmax-canvas-cloner-perf-offscreen-media, .pixmax-canvas-cloner-perf-onscreen-media"
+    )) {
+      media.classList.remove(
+        "pixmax-canvas-cloner-perf-offscreen-media",
+        "pixmax-canvas-cloner-perf-onscreen-media"
+      );
+    }
+    for (const node of document.querySelectorAll(
+      ".pixmax-canvas-cloner-perf-offscreen-node, .pixmax-canvas-cloner-perf-onscreen-node"
+    )) {
+      node.classList.remove(
+        "pixmax-canvas-cloner-perf-offscreen-node",
+        "pixmax-canvas-cloner-perf-onscreen-node"
+      );
+    }
+  }
+
+  function markPerformanceCacheDirty() {
+    performanceCacheDirty = true;
+    performanceLastSignature = "";
+    performanceLastEdgeSignature = "";
+  }
+
+  function refreshPerformanceCaches() {
+    if (!performanceCacheDirty) return;
+    performanceNodesCache = [...document.querySelectorAll(NODE_SELECTOR)];
+    performanceEdgesCache = [...document.querySelectorAll(".svelte-flow__edge[aria-label]")];
+    performanceEdgeEndpoints = new WeakMap();
+    performanceCacheDirty = false;
+  }
+
+  function schedulePerformanceUpdate(delay = 80) {
+    if (!performanceModeEnabled) return;
+    if (performanceUpdateScheduled) return;
+    performanceUpdateScheduled = true;
+    window.clearTimeout(performanceUpdateTimer);
+    performanceUpdateTimer = window.setTimeout(() => {
+      window.requestAnimationFrame(updatePerformanceMode);
+    }, delay);
+  }
+
+  function markPerformanceInteraction(duration = 260) {
+    if (!performanceModeEnabled) return;
+    setPerformanceMovingState(true);
+    schedulePerformanceUpdate(90);
+    window.clearTimeout(performanceInteractionTimer);
+    performanceInteractionTimer = window.setTimeout(() => {
+      setPerformanceMovingState(false);
+      performanceLastSignature = "";
+      performanceLastEdgeSignature = "";
+      schedulePerformanceUpdate(0);
+    }, duration);
+  }
+
+  function setPerformanceMovingState(moving) {
+    performanceCanvasIsMoving = Boolean(moving);
+    document.documentElement.classList.toggle(
+      "pixmax-canvas-cloner-performance-moving",
+      performanceCanvasIsMoving
+    );
+  }
+
+  function setCanvasNodeDragState(dragging) {
+    canvasNodeDragActive = Boolean(dragging);
+    document.documentElement.classList.toggle(
+      "pixmax-canvas-cloner-node-dragging",
+      canvasNodeDragActive
+    );
+  }
+
+  function setPerformanceCompactState(compact) {
+    document.documentElement.classList.toggle(
+      "pixmax-canvas-cloner-performance-compact",
+      Boolean(compact)
+    );
+  }
+
+  function isPerformanceFlowEvent(event) {
+    const target = event?.target;
+    if (!(target instanceof Element)) return false;
+    if (!target.closest(".svelte-flow")) return false;
+    if (target.closest(`#${PERFORMANCE_BUTTON_ID}, #${OPEN_LIKES_BUTTON_ID}, .${ACTIONS_CLASS}, .${CONTEXT_PASTE_CLASS}, ${TOOLBAR_SELECTOR}`)) {
+      return false;
+    }
+    return true;
+  }
+
+  function handlePerformancePointerDown(event) {
+    const flowEvent = isPerformanceFlowEvent(event);
+    const target = event?.target;
+    setCanvasNodeDragState(Boolean(flowEvent && target instanceof Element && target.closest(NODE_SELECTOR)));
+    performancePointerDownInFlow = Boolean(performanceModeEnabled && flowEvent);
+    if (performancePointerDownInFlow) markPerformanceInteraction(360);
+  }
+
+  function handlePerformancePointerMove(event) {
+    if (!performancePointerDownInFlow || !(event.buttons & 1)) return;
+    markPerformanceInteraction(220);
+  }
+
+  function handlePerformancePointerUp() {
+    const wasNodeDragActive = canvasNodeDragActive;
+    setCanvasNodeDragState(false);
+    performancePointerDownInFlow = false;
+    if (performanceModeEnabled) {
+      markPerformanceInteraction(180);
+      if (wasNodeDragActive) {
+        performanceLastEdgeSignature = "";
+      }
+      schedulePerformanceUpdate(0);
+    }
+    if (wasNodeDragActive && liveOptions?.enabled) {
+      if (livePendingNodeIds.size || liveSyncQueued) scheduleLiveOfficialSync();
+      scheduleLiveRevisionCheck("node-drag-end");
+    }
+  }
+
+  function handlePerformanceWheel(event) {
+    if (!isPerformanceFlowEvent(event)) return;
+    markPerformanceInteraction(320);
+  }
+
+  function updatePerformanceMode() {
+    performanceUpdateScheduled = false;
+    if (!performanceModeEnabled) return;
+    refreshPerformanceCaches();
+    const viewport = getPerformanceViewport();
+    setPerformanceCompactState(false);
+    const selectedIds = new Set(getSelectedLiveNodeIds());
+    const selectedSignature = [...selectedIds].join("|");
+    const signature = [
+      Math.round(viewport.x),
+      Math.round(viewport.y),
+      viewport.zoom.toFixed(3),
+      selectedSignature,
+      performanceNodesCache.length,
+      performanceEdgesCache.length
+    ].join("|");
+    if (signature === performanceLastSignature) return;
+    performanceLastSignature = signature;
+    performanceSelectedNodeIds = selectedIds;
+    const edgeSignature = `${selectedSignature}|${performanceEdgesCache.length}`;
+    if (edgeSignature !== performanceLastEdgeSignature) {
+      performanceLastEdgeSignature = edgeSignature;
+      updatePerformanceEdges(selectedIds);
+    }
+    updatePerformanceNodes(viewport, selectedIds);
+  }
+
+  function updatePerformanceEdges(selectedIds = new Set(getSelectedLiveNodeIds())) {
+    refreshPerformanceCaches();
+    for (const edge of performanceEdgesCache) {
+      const endpoints = getEdgeEndpoints(edge);
+      const visible = Boolean(
+        endpoints &&
+          selectedIds.size &&
+          (selectedIds.has(endpoints.source) || selectedIds.has(endpoints.target))
+      );
+      edge.classList.toggle("pixmax-canvas-cloner-perf-visible-edge", visible);
+    }
+  }
+
+  function getEdgeEndpoints(edge) {
+    const cached = performanceEdgeEndpoints.get(edge);
+    if (cached) return cached;
+    const label = String(edge.getAttribute("aria-label") || "");
+    const match = label.match(/^Edge from\s+(.+?)\s+to\s+(.+)$/);
+    if (!match) return null;
+    const endpoints = {
+      source: match[1].trim(),
+      target: match[2].trim()
+    };
+    performanceEdgeEndpoints.set(edge, endpoints);
+    return endpoints;
+  }
+
+  function updatePerformanceNodes(viewport, selectedIds) {
+    refreshPerformanceCaches();
+    for (const node of performanceNodesCache) {
+      applyPerformanceNodeVisibility(node, true);
+    }
+  }
+
+  function applyPerformanceNodeVisibility(node, visible) {
+    const alreadyVisible = node.classList.contains("pixmax-canvas-cloner-perf-onscreen-node");
+    if (alreadyVisible === visible && node.classList.contains("pixmax-canvas-cloner-perf-offscreen-node") !== visible) {
+      return;
+    }
+    node.classList.toggle("pixmax-canvas-cloner-perf-offscreen-node", !visible);
+    node.classList.toggle("pixmax-canvas-cloner-perf-onscreen-node", visible);
+    for (const media of node.querySelectorAll("img, video, canvas")) {
+      media.classList.toggle("pixmax-canvas-cloner-perf-offscreen-media", !visible);
+      media.classList.toggle("pixmax-canvas-cloner-perf-onscreen-media", visible);
+    }
+  }
+
+  function getPerformanceViewport() {
+    const viewport = document.querySelector(".svelte-flow__viewport");
+    return parseTransformToViewport(viewport?.style?.transform || getComputedStyle(viewport || document.body).transform);
+  }
+
+  function getPerformanceNodeRect(node, viewport) {
+    const cached = performanceNodeRects.get(node);
+    const transform = node.style?.transform || node.getAttribute("style") || "";
+    const position = parseTransformPosition(transform) || cached || getVisibleNodeCanvasRect(node, viewport);
+    const width = Number(cached?.width || node.style?.width?.replace("px", "") || node.offsetWidth || 360) || 360;
+    const height = Number(cached?.height || node.style?.height?.replace("px", "") || node.offsetHeight || 280) || 280;
+    const rect = {
+      height,
+      width,
+      x: Number(position.x) || 0,
+      y: Number(position.y) || 0
+    };
+    performanceNodeRects.set(node, rect);
+    return rect;
+  }
+
+  function getVisibleNodeCanvasRect(node, viewport) {
+    if (node.classList.contains("pixmax-canvas-cloner-perf-offscreen-node")) {
+      return performanceNodeRects.get(node) || { x: 0, y: 0 };
+    }
+    const rect = node.getBoundingClientRect();
+    return {
+      x: (rect.left - viewport.x) / viewport.zoom,
+      y: (rect.top - viewport.y) / viewport.zoom
+    };
+  }
+
+  function parseTransformToViewport(transform) {
+    const matrix = parseCssMatrix(transform);
+    if (matrix) {
+      return {
+        x: matrix.e,
+        y: matrix.f,
+        zoom: matrix.a || 1
+      };
+    }
+    const translated = parseTransformPosition(transform);
+    const scale = String(transform || "").match(/scale\(\s*([-0-9.]+)\s*\)/);
+    return {
+      x: translated?.x || 0,
+      y: translated?.y || 0,
+      zoom: Number(scale?.[1]) || 1
+    };
+  }
+
+  function parseTransformPosition(transform) {
+    const text = String(transform || "");
+    const matrix = parseCssMatrix(text);
+    if (matrix) return { x: matrix.e, y: matrix.f };
+    const translate = text.match(/translate(?:3d)?\(\s*([-0-9.]+)px(?:\s*,\s*|\s+)([-0-9.]+)px/i);
+    if (translate) {
+      return {
+        x: Number(translate[1]) || 0,
+        y: Number(translate[2]) || 0
+      };
+    }
+    return null;
+  }
+
+  function parseCssMatrix(transform) {
+    const match = String(transform || "").match(/matrix\(\s*([-0-9.eE]+),\s*([-0-9.eE]+),\s*([-0-9.eE]+),\s*([-0-9.eE]+),\s*([-0-9.eE]+),\s*([-0-9.eE]+)\s*\)/);
+    if (!match) return null;
+    return {
+      a: Number(match[1]) || 1,
+      d: Number(match[4]) || 1,
+      e: Number(match[5]) || 0,
+      f: Number(match[6]) || 0
+    };
   }
 
   function escapeHtmlAttribute(value) {
@@ -531,7 +997,13 @@
     return [...document.querySelectorAll("button, [role='button'], a")]
       .filter((element) => {
         if (!(element instanceof HTMLElement)) return false;
-        if (element.id === OPEN_LIKES_BUTTON_ID || element.closest(`#${OPEN_LIKES_BUTTON_ID}`)) return false;
+        if (
+          element.id === OPEN_LIKES_BUTTON_ID ||
+          element.id === PERFORMANCE_BUTTON_ID ||
+          element.closest(`#${OPEN_LIKES_BUTTON_ID}, #${PERFORMANCE_BUTTON_ID}`)
+        ) {
+          return false;
+        }
         if (element.closest(`.${ACTIONS_CLASS}, .${CONTEXT_PASTE_CLASS}, ${TOOLBAR_SELECTOR}`)) return false;
         const rect = element.getBoundingClientRect();
         if (!rect.width || !rect.height) return false;
@@ -1684,8 +2156,14 @@
     scheduleLiveFocusBroadcast("pointer", 80);
     if (event.buttons && event.target?.closest?.(".svelte-flow")) {
       markLiveDirtyNodes(event.target);
-      scheduleLiveOfficialSync();
-      scheduleLiveRevisionCheck("drag");
+      if (canvasNodeDragActive) {
+        liveSyncQueued = true;
+        window.clearTimeout(liveSyncTriggerTimer);
+        window.clearTimeout(scheduleLiveRevisionCheck.timer);
+      } else {
+        scheduleLiveOfficialSync();
+        scheduleLiveRevisionCheck("drag");
+      }
     }
     const now = Date.now();
     if (now - liveLastCursorSentAt < LIVE_CURSOR_SEND_INTERVAL_MS) return;
@@ -1742,6 +2220,13 @@
       .map((id) => String(id || "").trim())
       .filter(Boolean)
       .sort();
+  }
+
+  function didSelectedClassChange(mutation) {
+    if (!(mutation.target instanceof Element)) return false;
+    const hadSelected = /\bselected\b/.test(String(mutation.oldValue || ""));
+    const hasSelected = mutation.target.classList.contains("selected");
+    return hadSelected !== hasSelected;
   }
 
   function broadcastLiveFocus(reason) {
@@ -2426,19 +2911,22 @@
     const paneRect = pane.getBoundingClientRect();
     if (!nodeRect.width || !nodeRect.height || !paneRect.width || !paneRect.height) return false;
 
-    const deltaX = paneRect.left + paneRect.width / 2 - (nodeRect.left + nodeRect.width / 2);
-    const deltaY = paneRect.top + paneRect.height / 2 - (nodeRect.top + nodeRect.height / 2);
     const transform = getComputedStyle(viewport).transform;
     const matrix = transform && transform !== "none" ? new DOMMatrix(transform) : new DOMMatrix();
     const scaleX = matrix.a || 1;
     const scaleY = matrix.d || scaleX;
-    const targetScale = Math.min(Math.max(scaleX, 1.35), 1.8);
-    const zoomRatioX = targetScale / scaleX;
-    const zoomRatioY = targetScale / scaleY;
-    const centerX = paneRect.left + paneRect.width / 2;
-    const centerY = paneRect.top + paneRect.height / 2;
-    const nextX = centerX - (centerX - (matrix.e + deltaX)) * zoomRatioX;
-    const nextY = centerY - (centerY - (matrix.f + deltaY)) * zoomRatioY;
+    const previousViewport = {
+      x: matrix.e,
+      y: matrix.f,
+      zoom: scaleX
+    };
+    const targetScale = Math.min(Math.max(scaleX, 0.9), 1.35);
+    const nodeCenterX = nodeRect.left + nodeRect.width / 2;
+    const nodeCenterY = nodeRect.top + nodeRect.height / 2;
+    const flowCenterX = (nodeCenterX - paneRect.left - matrix.e) / scaleX;
+    const flowCenterY = (nodeCenterY - paneRect.top - matrix.f) / scaleY;
+    const nextX = paneRect.width / 2 - flowCenterX * targetScale;
+    const nextY = paneRect.height / 2 - flowCenterY * targetScale;
 
     if (smooth) {
       viewport.classList.add("pixmax-canvas-cloner-moving");
@@ -2449,7 +2937,62 @@
 
     viewport.style.transformOrigin = "0 0";
     viewport.style.transform = `translate(${nextX}px, ${nextY}px) scale(${targetScale})`;
+    persistOfficialWorkflowViewport({
+      x: nextX,
+      y: nextY,
+      zoom: targetScale
+    }, previousViewport);
     return true;
+  }
+
+  function isCloseViewport(first, second) {
+    if (!first || !second) return false;
+    return (
+      Math.abs(Number(first.x) - Number(second.x)) < 2 &&
+      Math.abs(Number(first.y) - Number(second.y)) < 2 &&
+      Math.abs(Number(first.zoom) - Number(second.zoom)) < 0.002
+    );
+  }
+
+  function getOfficialViewportStorageKeys(fileUuid, previousViewport) {
+    const prefix = "pixmax.genNodeHabit.v1:";
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      keys.push(key);
+    }
+    const matchingKeys = keys.filter((key) => {
+      try {
+        const data = JSON.parse(localStorage.getItem(key) || "{}");
+        return isCloseViewport(data.workflowViewports?.[fileUuid], previousViewport);
+      } catch {
+        return false;
+      }
+    });
+    return matchingKeys.length ? matchingKeys : keys.length ? keys : [`${prefix}_guest`];
+  }
+
+  function persistOfficialWorkflowViewport(viewport, previousViewport) {
+    const fileUuid = getCurrentFileUuid();
+    if (!fileUuid || !viewport) return;
+    for (const key of getOfficialViewportStorageKeys(fileUuid, previousViewport)) {
+      try {
+        const data = JSON.parse(localStorage.getItem(key) || "{}");
+        if (!data || typeof data !== "object") continue;
+        data.workflowViewports = data.workflowViewports && typeof data.workflowViewports === "object"
+          ? data.workflowViewports
+          : {};
+        data.workflowViewports[fileUuid] = {
+          x: viewport.x,
+          y: viewport.y,
+          zoom: viewport.zoom
+        };
+        localStorage.setItem(key, JSON.stringify(data));
+      } catch {
+        // Ignore local Pixmax viewport persistence failures; DOM focus still works.
+      }
+    }
   }
 
   function clearFocusParam() {
@@ -2457,6 +3000,8 @@
       const url = new URL(location.href);
       if (!url.searchParams.has(FOCUS_PARAM)) return;
       url.searchParams.delete(FOCUS_PARAM);
+      url.searchParams.delete(FOCUS_RECT_PARAM);
+      url.searchParams.delete(FOCUS_ZOOM_PARAM);
       history.replaceState(history.state, "", url.href);
     } catch {
       // Ignore URL cleanup failures.
@@ -2476,7 +3021,7 @@
       return;
     }
 
-    centerNodeInFlow(node);
+    centerNodeInFlow(node, false);
     window.setTimeout(() => {
       node.dispatchEvent(
         new MouseEvent("click", {
@@ -2488,7 +3033,7 @@
       node.classList.add("pixmax-canvas-cloner-focus");
       window.setTimeout(() => node.classList.remove("pixmax-canvas-cloner-focus"), 2600);
       showToast("Focused liked Pixmax result.");
-      clearFocusParam();
+      window.setTimeout(clearFocusParam, 1200);
     }, 300);
   }
 
@@ -2873,8 +3418,9 @@
     if (!document.body) return;
     cleanupLegacyCanvasUi();
     ensureStyle();
-    ensureOpenLikesButton();
+    ensureTopActionButtons();
     scheduleOpenLikesButtonRetries();
+    loadPerformanceModeSetting();
     refreshLikedState();
     syncLiveCollabState();
     focusNode(getFocusNodeId());
@@ -2887,6 +3433,11 @@
         ownLikedKeys = new Set(items.map(getLikeKey).filter(Boolean));
         likedColors = buildColorMap({ allItems: items });
         applyVisibleLikedMarks();
+      }
+      if (areaName === "local" && changes[PERFORMANCE_MODE_STORAGE_KEY]) {
+        setPerformanceModeEnabled(Boolean(changes[PERFORMANCE_MODE_STORAGE_KEY].newValue), {
+          persist: false
+        });
       }
       if (areaName === "local" && changes[WATCHED_VIDEO_STORAGE_KEY]) {
         watchedVideoKeys = new Set(normalizeWatchedVideoKeys(changes[WATCHED_VIDEO_STORAGE_KEY].newValue));
@@ -2922,6 +3473,14 @@
     refreshWatchedVideoState();
     document.addEventListener("play", handleVideoPlay, true);
     document.addEventListener("loadedmetadata", handleVideoMetadata, true);
+    document.addEventListener("pointerdown", handlePerformancePointerDown, true);
+    document.addEventListener("pointermove", handlePerformancePointerMove, true);
+    document.addEventListener("pointerup", handlePerformancePointerUp, true);
+    document.addEventListener("pointercancel", handlePerformancePointerUp, true);
+    document.addEventListener("keydown", () => schedulePerformanceUpdate(0), true);
+    document.addEventListener("keyup", () => schedulePerformanceUpdate(0), true);
+    window.addEventListener("wheel", handlePerformanceWheel, { passive: true, capture: true });
+    window.addEventListener("resize", () => schedulePerformanceUpdate(0));
     window.addEventListener("focus", refreshWatchedVideoState);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") refreshWatchedVideoState();
@@ -2939,17 +3498,33 @@
     );
     new MutationObserver((mutations) => {
       scheduleLegacyCleanup();
-      ensureOpenLikesButton();
+      ensureTopActionButtons();
       autoResolveCollaborationConflict();
       scheduleOfficialPresenceAppearance();
       neutralizeOfficialFocusColors();
+      if (performanceModeEnabled) {
+        let shouldRefreshPerformance = false;
+        for (const mutation of mutations) {
+          if (mutation.type === "childList") {
+            markPerformanceCacheDirty();
+            shouldRefreshPerformance = true;
+          }
+          if (
+            mutation.type === "attributes" &&
+            (mutation.attributeName === "aria-selected" || mutation.attributeName === "data-selected")
+          ) {
+            shouldRefreshPerformance = true;
+          }
+        }
+        if (shouldRefreshPerformance) schedulePerformanceUpdate(80);
+      }
       if (liveOptions?.enabled) {
         for (const mutation of mutations) {
           if (
             mutation.type === "attributes" &&
-            (mutation.attributeName === "class" ||
-              mutation.attributeName === "aria-selected" ||
-              mutation.attributeName === "data-selected")
+            (mutation.attributeName === "aria-selected" ||
+              mutation.attributeName === "data-selected" ||
+              (mutation.attributeName === "class" && didSelectedClassChange(mutation)))
           ) {
             scheduleLiveFocusBroadcast("selection-mutation", 80);
             break;
@@ -2965,6 +3540,7 @@
     }).observe(document.body, {
       attributes: true,
       attributeFilter: ["class", "aria-selected", "data-selected", "src", "poster"],
+      attributeOldValue: true,
       childList: true,
       subtree: true
     });

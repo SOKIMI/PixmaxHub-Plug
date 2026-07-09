@@ -9,6 +9,8 @@ const WATCHED_VIDEO_BASELINE_KEY = "pixmaxWatchedVideoBaselineAt";
 const WATCHED_VIDEO_REVIEW_BASELINE_KEY = "pixmaxWatchedVideoReviewBaselineAt";
 const KNOWN_VIDEO_REVIEW_MODEL_KEY = "pixmaxKnownVideoReviewModelAt";
 const FOCUS_PARAM = "pixmaxClonerFocus";
+const FOCUS_RECT_PARAM = "pixmaxClonerFocusRect";
+const FOCUS_ZOOM_PARAM = "pixmaxClonerFocusZoom";
 const API_ORIGIN = "https://app.pixmax.cn";
 const SHARED_LIKES_MARKER = "PIXMAX_CANVAS_CLONER_LIKES_V1";
 const LIKE_INDEX_MARKER = "PIXMAX_CANVAS_CLONER_LIKE_INDEX_V1";
@@ -455,7 +457,7 @@ function renderItem(item) {
     ? `${formatLikedAt(item.likedAt, item.likedBy)} · ${downloadCode}`
     : formatLikedAt(item.likedAt, item.likedBy);
   if (downloadCode) meta.title = `Eagle 下载编码：${downloadCode}`;
-  open.href = buildFocusUrl(pageUrl, item.nodeId) || mediaUrl || "#";
+  open.href = buildFocusUrl(pageUrl, item.nodeId, item) || mediaUrl || "#";
   renderReviewPanel(item, card, ribbon);
   if (eagle) {
     eagle.disabled = !mediaUrl;
@@ -1183,7 +1185,7 @@ function renderExportCard(item) {
   const prompt = item.annotation || "No prompt captured.";
   const meta = formatLikedAt(item.likedAt, item.likedBy);
   const openLink = pageUrl
-    ? `<a class="open" href="${escapeAttribute(buildFocusUrl(pageUrl, item.nodeId))}" target="_blank" rel="noreferrer">Open original</a>`
+    ? `<a class="open" href="${escapeAttribute(buildFocusUrl(pageUrl, item.nodeId, item))}" target="_blank" rel="noreferrer">Open original</a>`
     : "";
 
   return `    <article>
@@ -1214,16 +1216,31 @@ function normalizeUrl(value) {
   return /^https?:\/\//i.test(url) ? url : "";
 }
 
-function buildFocusUrl(value, nodeId) {
+function buildFocusUrl(value, nodeId, item = {}) {
   const url = normalizeUrl(value);
   if (!url) return "";
   try {
     const parsed = new URL(url);
+    parsed.searchParams.delete(FOCUS_PARAM);
+    parsed.searchParams.delete(FOCUS_RECT_PARAM);
+    parsed.searchParams.delete(FOCUS_ZOOM_PARAM);
     if (nodeId) parsed.searchParams.set(FOCUS_PARAM, nodeId);
+    const rect = normalizeFocusRect(item.focusRect);
+    if (rect) {
+      parsed.searchParams.set(
+        FOCUS_RECT_PARAM,
+        [rect.x, rect.y, rect.width, rect.height].map(formatFocusNumber).join(",")
+      );
+      parsed.searchParams.set(FOCUS_ZOOM_PARAM, "1.15");
+    }
     return parsed.href;
   } catch {
     return url;
   }
+}
+
+function formatFocusNumber(value) {
+  return String(Math.round(Number(value) * 1000) / 1000);
 }
 
 function filenameFromUrl(value) {
@@ -1427,6 +1444,31 @@ function parseNodeMetaData(rawNode) {
   }
 }
 
+function normalizeFocusRect(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const rect = {
+    height: Number(value.height),
+    width: Number(value.width),
+    x: Number(value.x),
+    y: Number(value.y)
+  };
+  if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  return rect;
+}
+
+function getNodeFocusRect(rawNode) {
+  const metaData = parseNodeMetaData(rawNode);
+  const position = metaData.position && typeof metaData.position === "object" ? metaData.position : {};
+  const measured = metaData.measured && typeof metaData.measured === "object" ? metaData.measured : {};
+  return normalizeFocusRect({
+    height: metaData.height || measured.height || rawNode?.height || 260,
+    width: metaData.width || measured.width || rawNode?.width || 360,
+    x: position.x || 0,
+    y: position.y || 0
+  });
+}
+
 function getRawNodeLabel(rawNode) {
   const metaData = parseNodeMetaData(rawNode);
   return String(metaData.data?.label || "").trim();
@@ -1469,11 +1511,12 @@ function getItemDownloadCode(item) {
 function buildAssetInfoByNodeId(nodes) {
   const map = new Map();
   for (const node of nodes || []) {
+    if (!node?.uuid) continue;
     const assetUuid = getAssetUuidFromNode(node);
-    if (!assetUuid || !node?.uuid) continue;
     map.set(node.uuid, {
       assetUuid,
       downloadCode: buildDownloadCode(assetUuid, node.uuid),
+      focusRect: getNodeFocusRect(node),
       mediaType: inferNodeMediaType(node)
     });
   }
@@ -1508,6 +1551,7 @@ function enrichItemWithAssetInfo(item, assetInfoByNodeId) {
     ...item,
     assetUuid: item.assetUuid || info.assetUuid,
     downloadCode: item.downloadCode || info.downloadCode,
+    focusRect: normalizeFocusRect(item.focusRect) || info.focusRect,
     mediaType: item.mediaType || info.mediaType
   };
 }
@@ -1516,7 +1560,7 @@ async function enrichItemsWithOriginalAssetInfo(items) {
   const pendingByFileUuid = new Map();
   let changed = false;
   for (const item of items || []) {
-    if (getItemDownloadCode(item)) continue;
+    if (getItemDownloadCode(item) && normalizeFocusRect(item.focusRect)) continue;
     const fileUuid = String(item?.fileUuid || "").trim();
     const nodeId = String(item?.nodeId || "").trim();
     if (!fileUuid || !nodeId) continue;
@@ -1538,6 +1582,10 @@ async function enrichItemsWithOriginalAssetInfo(items) {
           }
           if (!item.downloadCode && info.downloadCode) {
             item.downloadCode = info.downloadCode;
+            changed = true;
+          }
+          if (!normalizeFocusRect(item.focusRect) && info.focusRect) {
+            item.focusRect = info.focusRect;
             changed = true;
           }
           if (!item.mediaType && info.mediaType) {

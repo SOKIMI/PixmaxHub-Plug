@@ -5,6 +5,17 @@
   const REQUEST_EVENT = "pixmax-canvas-cloner:request";
   const RESPONSE_SOURCE = "pixmax-canvas-cloner:bridge";
   const LIVE_INTERNALS_KEY = "__pixmaxHubLiveInternals";
+  const FOCUS_PARAM = "pixmaxClonerFocus";
+  const FOCUS_RECT_PARAM = "pixmaxClonerFocusRect";
+  const FOCUS_ZOOM_PARAM = "pixmaxClonerFocusZoom";
+  const OFFICIAL_VIEWPORT_STORAGE_PREFIX = "pixmax.genNodeHabit.v1:";
+  let earlyFocusViewportSeed = buildEarlyFocusViewportSeedFromUrl();
+
+  installOfficialViewportSeedPatch();
+  if (earlyFocusViewportSeed) {
+    persistEarlyFocusViewportSeed(earlyFocusViewportSeed);
+    scheduleEarlyFocusViewportSeedExpiry(earlyFocusViewportSeed);
+  }
 
   function installLiveInternalsProbe() {
     if (window[LIVE_INTERNALS_KEY]?.installed) return;
@@ -323,6 +334,172 @@
 
   async function fetchCurrentCanvas() {
     return fetchCanvas();
+  }
+
+  seedFocusViewportBeforeAppInit();
+
+  function installOfficialViewportSeedPatch() {
+    if (window.__pixmaxCanvasClonerViewportSeedPatch) return;
+    window.__pixmaxCanvasClonerViewportSeedPatch = true;
+    const originalGetItem = Storage.prototype.getItem;
+    const originalSetItem = Storage.prototype.setItem;
+
+    Storage.prototype.getItem = function patchedGetItem(key) {
+      const value = originalGetItem.call(this, key);
+      if (this !== localStorage || !shouldApplyEarlyFocusViewportSeed(key)) return value;
+      return mergeOfficialViewportStore(value, earlyFocusViewportSeed);
+    };
+
+    Storage.prototype.setItem = function patchedSetItem(key, value) {
+      if (this === localStorage && shouldApplyEarlyFocusViewportSeed(key)) {
+        return originalSetItem.call(this, key, mergeOfficialViewportStore(value, earlyFocusViewportSeed));
+      }
+      return originalSetItem.call(this, key, value);
+    };
+  }
+
+  function shouldApplyEarlyFocusViewportSeed(key) {
+    return (
+      earlyFocusViewportSeed &&
+      Date.now() < earlyFocusViewportSeed.expiresAt &&
+      typeof key === "string" &&
+      key.startsWith(OFFICIAL_VIEWPORT_STORAGE_PREFIX)
+    );
+  }
+
+  function mergeOfficialViewportStore(value, seed) {
+    if (!seed?.fileUuid || !seed?.viewport) return value;
+    let data = {};
+    try {
+      data = value ? JSON.parse(value) : {};
+    } catch {
+      data = {};
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
+    data.workflowViewports = data.workflowViewports && typeof data.workflowViewports === "object"
+      ? data.workflowViewports
+      : {};
+    data.workflowViewports[seed.fileUuid] = seed.viewport;
+    return JSON.stringify(data);
+  }
+
+  function getFocusNodeIdFromUrl() {
+    try {
+      return new URL(location.href).searchParams.get(FOCUS_PARAM) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function getFocusRectFromUrl() {
+    try {
+      const value = new URL(location.href).searchParams.get(FOCUS_RECT_PARAM) || "";
+      const [x, y, width, height] = value.split(",").map((part) => Number(part));
+      if (![x, y, width, height].every(Number.isFinite)) return null;
+      if (width <= 0 || height <= 0) return null;
+      return { height, width, x, y };
+    } catch {
+      return null;
+    }
+  }
+
+  function getFocusZoomFromUrl() {
+    try {
+      const zoom = Number(new URL(location.href).searchParams.get(FOCUS_ZOOM_PARAM));
+      return Number.isFinite(zoom) && zoom > 0 ? Math.min(Math.max(zoom, 0.7), 1.6) : 1.15;
+    } catch {
+      return 1.15;
+    }
+  }
+
+  function buildEarlyFocusViewportSeedFromUrl() {
+    const fileUuid = getCanvasIdentity().fileUuid;
+    const nodeId = getFocusNodeIdFromUrl();
+    const rect = getFocusRectFromUrl();
+    if (!fileUuid || !nodeId || !rect) return null;
+    return {
+      expiresAt: Date.now() + 8000,
+      fileUuid,
+      viewport: buildSeedViewportForRect(rect, getFocusZoomFromUrl())
+    };
+  }
+
+  function getRawNodeSize(rawNode, metaData) {
+    const measured = metaData.measured && typeof metaData.measured === "object" ? metaData.measured : {};
+    return {
+      height: Number(metaData.height || measured.height || rawNode?.height || 260) || 260,
+      width: Number(metaData.width || measured.width || rawNode?.width || 360) || 360
+    };
+  }
+
+  function buildSeedViewportForNode(rawNode) {
+    return buildSeedViewportForRect(getRawNodeFocusRect(rawNode), 1.15);
+  }
+
+  function getRawNodeFocusRect(rawNode) {
+    const metaData = parseMetaData(rawNode);
+    const position = metaData.position && typeof metaData.position === "object" ? metaData.position : {};
+    const size = getRawNodeSize(rawNode, metaData);
+    return {
+      height: size.height,
+      width: size.width,
+      x: Number(position.x) || 0,
+      y: Number(position.y) || 0
+    };
+  }
+
+  function buildSeedViewportForRect(rect, zoom = 1.15) {
+    const paneWidth = Math.max(640, window.innerWidth || document.documentElement.clientWidth || 1440);
+    const paneHeight = Math.max(520, window.innerHeight || document.documentElement.clientHeight || 900);
+    return {
+      x: paneWidth / 2 - (rect.x + rect.width / 2) * zoom,
+      y: paneHeight / 2 - (rect.y + rect.height / 2) * zoom,
+      zoom
+    };
+  }
+
+  function persistEarlyFocusViewportSeed(seed) {
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(OFFICIAL_VIEWPORT_STORAGE_PREFIX)) keys.push(key);
+    }
+    if (!keys.length) keys.push(`${OFFICIAL_VIEWPORT_STORAGE_PREFIX}_guest`);
+    for (const key of keys) {
+      try {
+        localStorage.setItem(key, mergeOfficialViewportStore(localStorage.getItem(key), seed));
+      } catch {
+        // Ignore storage failures; the patched getItem still helps during official boot.
+      }
+    }
+  }
+
+  function scheduleEarlyFocusViewportSeedExpiry(seed) {
+    window.setTimeout(() => {
+      if (earlyFocusViewportSeed === seed) earlyFocusViewportSeed = null;
+    }, Math.max(1000, seed.expiresAt - Date.now() + 500));
+  }
+
+  async function seedFocusViewportBeforeAppInit() {
+    if (earlyFocusViewportSeed) return;
+    const fileUuid = getCanvasIdentity().fileUuid;
+    const nodeId = getFocusNodeIdFromUrl();
+    if (!fileUuid || !nodeId) return;
+    try {
+      const canvas = await fetchCanvas(fileUuid);
+      const rawNode = (canvas.nodes || []).find((node) => node?.uuid === nodeId);
+      if (!rawNode) return;
+      const seed = {
+        expiresAt: Date.now() + 6000,
+        fileUuid,
+        viewport: buildSeedViewportForNode(rawNode)
+      };
+      earlyFocusViewportSeed = seed;
+      persistEarlyFocusViewportSeed(seed);
+      scheduleEarlyFocusViewportSeedExpiry(seed);
+    } catch {
+      // The normal content-script focus path will still run if early seeding fails.
+    }
   }
 
   async function getCurrentCanvasRevision() {
@@ -1383,6 +1560,7 @@
       assetUuid: getAssetUuid(rawNode?.defaultAsset),
       downloadCode: buildDownloadCode(rawNode?.defaultAsset, nodeId),
       fileUuid: getCanvasIdentity().fileUuid,
+      focusRect: getRawNodeFocusRect(rawNode ?? {}),
       mediaType: inferAssetMediaType(rawNode?.defaultAsset, url || fallback?.url) || fallback?.mediaType || "",
       name: getNodeLabel(rawNode ?? {}) || fallback?.name || "",
       nodeId,
@@ -1425,6 +1603,7 @@
       assetUuid: getAssetUuid(rawNode?.defaultAsset),
       downloadCode: buildDownloadCode(rawNode?.defaultAsset, nodeId),
       fileUuid: getCanvasIdentity().fileUuid,
+      focusRect: getRawNodeFocusRect(rawNode ?? {}),
       mediaType: inferAssetMediaType(rawNode?.defaultAsset, url || fallback?.url) || fallback?.mediaType || "",
       name: getNodeLabel(rawNode ?? {}) || fallback?.name || "",
       nodeId,
