@@ -41,6 +41,7 @@ const ownerFilters = document.querySelector("#ownerFilters");
 const reviewStats = document.querySelector("#reviewStats");
 const searchLikesInput = document.querySelector("#searchLikes");
 const statusFilterButtons = [...document.querySelectorAll("[data-status-filter]")];
+const resolutionFilterButtons = [...document.querySelectorAll("[data-resolution-filter]")];
 const refreshLikesButton = document.querySelector("#refreshLikes");
 const togglePromptsButton = document.querySelector("#togglePrompts");
 const multiSelectButton = document.querySelector("#multiSelect");
@@ -60,6 +61,7 @@ let promptsVisible = false;
 let multiSelectMode = false;
 let activeSearchQuery = "";
 let activeStatusFilter = "all";
+let activeResolutionFilter = "all";
 let activeSourceItems = [];
 let activeRenderOptions = {};
 let reviewVideoSoundEnabled = true;
@@ -67,6 +69,7 @@ let expandedMediaPreview = null;
 let watchedVideoKeys = new Set();
 let knownVideoKeys = new Set();
 let unreadVideoKeys = new Set();
+let resolutionRenderTimer = 0;
 
 init();
 
@@ -94,6 +97,15 @@ function init() {
     button.addEventListener("click", () => {
       activeStatusFilter = button.dataset.statusFilter || "all";
       for (const item of statusFilterButtons) {
+        item.setAttribute("aria-pressed", String(item === button));
+      }
+      renderFilteredItems();
+    });
+  }
+  for (const button of resolutionFilterButtons) {
+    button.addEventListener("click", () => {
+      activeResolutionFilter = button.dataset.resolutionFilter || "all";
+      for (const item of resolutionFilterButtons) {
         item.setAttribute("aria-pressed", String(item === button));
       }
       renderFilteredItems();
@@ -240,7 +252,7 @@ function renderFilteredItems() {
 }
 
 function filterItems(items) {
-  return items.filter((item) => matchesSearch(item) && matchesStatus(item));
+  return items.filter((item) => matchesSearch(item) && matchesStatus(item) && matchesResolution(item));
 }
 
 function matchesSearch(item) {
@@ -268,6 +280,70 @@ function matchesStatus(item) {
   if (activeStatusFilter === "all") return true;
   if (activeStatusFilter === "unreviewed") return !item.reviewStatus;
   return item.reviewStatus === activeStatusFilter;
+}
+
+function matchesResolution(item) {
+  if (activeResolutionFilter === "all") return true;
+  return getVideoResolution(item).key === activeResolutionFilter;
+}
+
+function getVideoDimensions(item) {
+  const width = Number(item?.videoWidth || item?.mediaWidth || item?.pixelWidth || item?.width);
+  const height = Number(item?.videoHeight || item?.mediaHeight || item?.pixelHeight || item?.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+function setVideoDimensions(item, width, height) {
+  const nextWidth = Math.round(Number(width));
+  const nextHeight = Math.round(Number(height));
+  if (!Number.isFinite(nextWidth) || !Number.isFinite(nextHeight) || nextWidth <= 0 || nextHeight <= 0) {
+    return false;
+  }
+  if (item.videoWidth === nextWidth && item.videoHeight === nextHeight) return false;
+  item.videoWidth = nextWidth;
+  item.videoHeight = nextHeight;
+  return true;
+}
+
+function getVideoResolution(item) {
+  if (!isVideoItem(item)) return { key: "", label: "", dimensions: null };
+  const dimensions = getVideoDimensions(item);
+  if (!dimensions) return { key: "", label: "", dimensions: null };
+  const longEdge = Math.max(dimensions.width, dimensions.height);
+  const shortEdge = Math.min(dimensions.width, dimensions.height);
+  let key = "other";
+  let label = `${dimensions.width}×${dimensions.height}`;
+  if (longEdge >= 3800 && Math.abs(shortEdge - 2160) <= 24) {
+    key = "4k";
+    label = "4K";
+  } else if (longEdge >= 1900 && Math.abs(shortEdge - 1080) <= 16) {
+    key = "1080p";
+    label = "1080p";
+  } else if (longEdge >= 1260 && Math.abs(shortEdge - 720) <= 12) {
+    key = "720p";
+    label = "720p";
+  }
+  return { key, label, dimensions };
+}
+
+function renderResolutionBadge(item, badge) {
+  if (!badge) return;
+  const resolution = getVideoResolution(item);
+  badge.hidden = !resolution.label;
+  badge.textContent = resolution.label;
+  badge.dataset.resolution = resolution.key;
+  badge.title = resolution.dimensions
+    ? `视频尺寸：${resolution.dimensions.width} × ${resolution.dimensions.height}`
+    : "";
+}
+
+function scheduleResolutionRender() {
+  if (activeResolutionFilter === "all" || resolutionRenderTimer) return;
+  resolutionRenderTimer = window.setTimeout(() => {
+    resolutionRenderTimer = 0;
+    renderFilteredItems();
+  }, 120);
 }
 
 function render(items, options = {}) {
@@ -392,6 +468,7 @@ function renderItem(item) {
   const select = card.querySelector(".select-like");
   const preview = card.querySelector(".preview");
   const ribbon = card.querySelector(".review-ribbon");
+  const resolutionBadge = card.querySelector(".resolution-badge");
   const eagle = card.querySelector(".eagle");
   const title = card.querySelector("h2");
   const prompt = card.querySelector(".prompt");
@@ -412,6 +489,7 @@ function renderItem(item) {
 
   card.dataset.likeKey = likeKey;
   card.dataset.likeColor = likeColor;
+  card.classList.toggle("video-card", isVideoItem(item));
   if (videoWatchKey) {
     card.dataset.watchKey = videoWatchKey;
     card.classList.toggle("video-unwatched", unreadVideoKeys.has(videoWatchKey));
@@ -449,7 +527,8 @@ function renderItem(item) {
   } else {
     preview.href = mediaUrl || pageUrl || "#";
   }
-  preview.append(createPreview(item));
+  preview.append(createPreview(item, () => renderResolutionBadge(item, resolutionBadge)));
+  renderResolutionBadge(item, resolutionBadge);
   title.textContent = item.name || filenameFromUrl(mediaUrl) || "Pixmax result";
   prompt.textContent = item.annotation || "No prompt captured.";
   prompt.title = item.annotation || "";
@@ -784,20 +863,30 @@ async function importSelectedLikesToEagle() {
     batchEagleButton.disabled = false;
   }
 }
-function createPreview(item) {
+function createPreview(item, onMetadata) {
   const url = normalizeUrl(item?.url);
   if (!url) return document.createTextNode("No preview");
 
   if (isVideoUrl(url)) {
     const video = document.createElement("video");
     const poster = normalizeUrl(item.poster || item.thumbnailUrl || item.previewUrl);
-    video.src = url;
     video.controls = true;
     video.muted = !reviewVideoSoundEnabled;
     video.playsInline = true;
-    video.preload = "metadata";
+    video.preload = "none";
     video.dataset.reviewVideo = "true";
     video.dataset.watchKey = getItemVideoWatchKey(item);
+    video.dataset.src = url;
+    video.addEventListener("click", (event) => {
+      if (video.hasAttribute("src")) return;
+      event.stopPropagation();
+      video.src = video.dataset.src;
+      video.play().catch(() => {});
+    });
+    video.addEventListener("loadedmetadata", () => {
+      if (setVideoDimensions(item, video.videoWidth, video.videoHeight)) scheduleResolutionRender();
+      onMetadata?.();
+    });
     video.addEventListener("play", () => {
       markItemVideoWatched(item).catch(() => {});
     });
@@ -1517,10 +1606,41 @@ function buildAssetInfoByNodeId(nodes) {
       assetUuid,
       downloadCode: buildDownloadCode(assetUuid, node.uuid),
       focusRect: getNodeFocusRect(node),
-      mediaType: inferNodeMediaType(node)
+      mediaType: inferNodeMediaType(node),
+      ...getNodeVideoDimensions(node)
     });
   }
   return map;
+}
+
+function getNodeVideoDimensions(node) {
+  if (inferNodeMediaType(node) !== "video") return {};
+  const asset = node?.defaultAsset || {};
+  const nodeMeta = parseNodeMetaData(node);
+  const sources = [
+    asset,
+    asset.metadata,
+    asset.metaData,
+    asset.info,
+    asset.data,
+    nodeMeta.data?.asset,
+    nodeMeta.data?.output,
+    nodeMeta.data?.video,
+    nodeMeta.video
+  ];
+  for (const rawSource of sources) {
+    let source = rawSource;
+    if (typeof source === "string") {
+      try { source = JSON.parse(source); } catch { source = null; }
+    }
+    if (!source || typeof source !== "object") continue;
+    const width = Number(source.videoWidth || source.pixelWidth || source.mediaWidth || source.width);
+    const height = Number(source.videoHeight || source.pixelHeight || source.mediaHeight || source.height);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      return { videoWidth: Math.round(width), videoHeight: Math.round(height) };
+    }
+  }
+  return {};
 }
 
 function inferNodeMediaType(node) {
@@ -1552,7 +1672,9 @@ function enrichItemWithAssetInfo(item, assetInfoByNodeId) {
     assetUuid: item.assetUuid || info.assetUuid,
     downloadCode: item.downloadCode || info.downloadCode,
     focusRect: normalizeFocusRect(item.focusRect) || info.focusRect,
-    mediaType: item.mediaType || info.mediaType
+    mediaType: item.mediaType || info.mediaType,
+    videoWidth: item.videoWidth || info.videoWidth,
+    videoHeight: item.videoHeight || info.videoHeight
   };
 }
 
@@ -1560,7 +1682,11 @@ async function enrichItemsWithOriginalAssetInfo(items) {
   const pendingByFileUuid = new Map();
   let changed = false;
   for (const item of items || []) {
-    if (getItemDownloadCode(item) && normalizeFocusRect(item.focusRect)) continue;
+    if (
+      getItemDownloadCode(item) &&
+      normalizeFocusRect(item.focusRect) &&
+      (!isVideoItem(item) || getVideoDimensions(item))
+    ) continue;
     const fileUuid = String(item?.fileUuid || "").trim();
     const nodeId = String(item?.nodeId || "").trim();
     if (!fileUuid || !nodeId) continue;
@@ -1590,6 +1716,11 @@ async function enrichItemsWithOriginalAssetInfo(items) {
           }
           if (!item.mediaType && info.mediaType) {
             item.mediaType = info.mediaType;
+            changed = true;
+          }
+          if (!getVideoDimensions(item) && info.videoWidth && info.videoHeight) {
+            item.videoWidth = info.videoWidth;
+            item.videoHeight = info.videoHeight;
             changed = true;
           }
         }

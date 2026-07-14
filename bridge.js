@@ -1693,6 +1693,7 @@
       throw new Error("The selected Pixmax result does not expose a media URL.");
     }
 
+    const videoDimensions = getAssetVideoDimensions(rawNode);
     return {
       annotation: getEagleAnnotation(rawNodes, rawNode ?? {}),
       assetUuid: getAssetUuid(rawNode?.defaultAsset),
@@ -1704,8 +1705,40 @@
       nodeId,
       poster: resolveAssetPreviewUrl(rawNode?.defaultAsset) || fallback?.poster || "",
       url: url || fallback.url,
-      website: location.href
+      website: location.href,
+      ...videoDimensions
     };
+  }
+
+  function getAssetVideoDimensions(rawNode) {
+    const asset = rawNode?.defaultAsset || {};
+    const mediaUrl = resolveAssetUrl(asset);
+    if (inferAssetMediaType(asset, mediaUrl) !== "video") return {};
+    const nodeMeta = parseMetaData(rawNode);
+    const sources = [
+      asset,
+      asset.metadata,
+      asset.metaData,
+      asset.info,
+      asset.data,
+      nodeMeta.data?.asset,
+      nodeMeta.data?.output,
+      nodeMeta.data?.video,
+      nodeMeta.video
+    ];
+    for (const rawSource of sources) {
+      let source = rawSource;
+      if (typeof source === "string") {
+        try { source = JSON.parse(source); } catch { source = null; }
+      }
+      if (!source || typeof source !== "object") continue;
+      const width = Number(source.videoWidth || source.pixelWidth || source.mediaWidth || source.width);
+      const height = Number(source.videoHeight || source.pixelHeight || source.mediaHeight || source.height);
+      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+        return { videoWidth: Math.round(width), videoHeight: Math.round(height) };
+      }
+    }
+    return {};
   }
 
   function getRawNodeHistoryTime(rawNode) {

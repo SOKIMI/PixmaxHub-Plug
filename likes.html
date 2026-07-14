@@ -35,6 +35,13 @@
         <button type="button" data-status-filter="reject">淘汰</button>
         <button type="button" data-status-filter="unreviewed">未审</button>
       </div>
+      <div class="resolution-filter" role="group" aria-label="视频分辨率">
+        <span>视频分辨率</span>
+        <button type="button" data-resolution-filter="all" aria-pressed="true">全部</button>
+        <button type="button" data-resolution-filter="4k">4K</button>
+        <button type="button" data-resolution-filter="1080p">1080p</button>
+        <button type="button" data-resolution-filter="720p">720p</button>
+      </div>
     </section>
     <section id="reviewStats" class="review-stats" aria-label="Review summary"></section>
     <nav id="ownerFilters" class="owner-filters" aria-label="Shared Like owners"></nav>
@@ -49,6 +56,7 @@
         <span class="badge" aria-label="Liked">♥</span>
         <div class="preview-wrap">
           <a class="preview" target="_blank" rel="noreferrer"></a>
+          <div class="resolution-badge" hidden></div>
           <div class="review-ribbon" hidden></div>
         </div>
         <div class="body">
