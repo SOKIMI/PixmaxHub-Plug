@@ -20,7 +20,7 @@
   const OFFICIAL_FOCUS_STYLE_ID = "collab-remote-focus-styles";
   const LIVE_FOCUS_STYLE_ID = "pixmax-canvas-cloner-live-focus-colors";
   const LIVE_SELECTION_STYLE_ID = "pixmax-canvas-cloner-live-selection-color";
-  const STYLE_VERSION = "1.4.34";
+  const STYLE_VERSION = "1.4.35";
   const TOAST_ID = "pixmax-canvas-cloner-toast";
   const LIVE_TOGGLE_ID = "pixmax-canvas-cloner-live-toggle";
   const OPEN_LIKES_BUTTON_ID = "pixmax-canvas-cloner-open-likes";
@@ -72,6 +72,7 @@
   const extensionRequests = new Map();
   const pendingToolbarRoots = new Set();
   const pendingPromptToolRoots = new Set();
+  const pendingUnwatchedVideoRoots = new Set();
   let likedKeys = new Set();
   let ownLikedKeys = new Set();
   let likedColors = new Map();
@@ -80,9 +81,16 @@
   let unreadVideoKeys = new Set();
   let watchedVideoOptions = null;
   let videoWatchStateReady = false;
+  let watchedVideoRefreshPromise = null;
+  let watchedVideoLastRefreshAt = 0;
+  let trackedVideoNodeKeys = new Map();
+  let videoWatchKeyCache = new WeakMap();
+  let pendingDiscoveredVideoKeys = new Set();
+  let discoveredVideoFlushTimer = 0;
   let toolbarSyncScheduled = false;
   let contextPasteSyncScheduled = false;
   let promptToolsSyncScheduled = false;
+  let unwatchedVideoSyncScheduled = false;
   let legacyCleanupScheduled = false;
   let videoHistoryItems = [];
   let videoHistoryVisibleCount = VIDEO_HISTORY_PAGE_SIZE;
@@ -99,6 +107,7 @@
   let videoHistoryObservedContainer = null;
   let videoHistoryObservedShell = null;
   let videoHistoryMediaObserver = null;
+  let videoHistoryActivePlayer = null;
   let videoHistoryPositionScheduled = false;
   let officialViewportPersistTimers = new Set();
   let performanceModeEnabled = false;
@@ -787,12 +796,47 @@
         background: #ffd500;
         box-shadow: 0 0 0 1px rgb(255 255 255 / 75%);
       }
-      .pixmax-canvas-cloner-video-history-card video {
+      .pixmax-canvas-cloner-video-history-card video,
+      .pixmax-canvas-cloner-video-history-card .pixmax-canvas-cloner-video-history-preview {
         display: block;
         width: 100%;
         aspect-ratio: 16 / 9;
         background: #050608;
         object-fit: contain;
+      }
+      .pixmax-canvas-cloner-video-history-card .pixmax-canvas-cloner-video-history-preview {
+        position: relative;
+        min-height: 0 !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        overflow: hidden;
+        color: #fff;
+      }
+      .pixmax-canvas-cloner-video-history-preview img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+      .pixmax-canvas-cloner-video-history-preview img:not([src]) {
+        visibility: hidden;
+      }
+      .pixmax-canvas-cloner-video-history-play {
+        position: absolute;
+        inset: 50% auto auto 50%;
+        display: grid;
+        width: 46px;
+        height: 46px;
+        border: 1px solid rgb(255 255 255 / 42%);
+        border-radius: 999px;
+        place-items: center;
+        background: rgb(10 12 15 / 78%);
+        box-shadow: 0 8px 24px rgb(0 0 0 / 38%);
+        font-size: 18px;
+        line-height: 1;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
       }
       .pixmax-canvas-cloner-video-history-meta {
         display: grid;
@@ -1614,7 +1658,7 @@
     if (videoHistoryOpen) {
       videoHistoryVisibleCount = VIDEO_HISTORY_PAGE_SIZE;
       renderVideoHistoryPanel({ stickToBottom: true });
-      refreshVideoHistory({ stickToBottom: true });
+      if (!videoHistoryHasLoadedOnce) scheduleVideoHistoryRefresh(600, { stickToBottom: true });
     } else {
       suspendVideoHistoryMedia(true);
     }
@@ -1640,11 +1684,11 @@
       videoHistoryMediaObserver?.disconnect();
       list.innerHTML = visibleItems.map(renderVideoHistoryCard).join("");
       videoHistoryRenderedKey = nextRenderKey;
-      hydrateVideoHistoryCards(list);
     } else {
       updateVideoHistoryUnreadMarks();
       updateVideoHistoryLikeMarks();
     }
+    hydrateVideoHistoryCards(list);
     if (options.stickToBottom) {
       window.requestAnimationFrame(() => {
         list.scrollTop = list.scrollHeight;
@@ -1667,12 +1711,15 @@
 
   function renderVideoHistoryCard(item) {
     const key = getVideoHistoryItemKey(item);
-    const unwatched = Boolean(item.watchKey && unreadVideoKeys.has(item.watchKey));
+    const unwatched = isVideoUnwatched(item.watchKey);
     const liked = ownLikedKeys.has(item.nodeId);
     const color = likedColors.get(item.nodeId) || DEFAULT_LIKE_COLOR;
     return `
       <article class="pixmax-canvas-cloner-video-history-card" data-key="${escapeHtmlAttribute(key)}" data-watch-key="${escapeHtmlAttribute(item.watchKey)}" data-node-id="${escapeHtmlAttribute(item.nodeId)}" data-unwatched="${unwatched ? "true" : "false"}">
-        <video data-src="${escapeHtmlAttribute(item.url)}" data-poster="${escapeHtmlAttribute(item.poster)}" controls playsinline preload="none"></video>
+        <button type="button" class="pixmax-canvas-cloner-video-history-preview" data-video-history-preview="true" data-video-history-action="play" data-src="${escapeHtmlAttribute(item.url)}" data-poster="${escapeHtmlAttribute(item.poster)}" aria-label="播放历史视频">
+          <img alt="" loading="lazy" decoding="async" fetchpriority="low">
+          <span class="pixmax-canvas-cloner-video-history-play" aria-hidden="true">▶</span>
+        </button>
         <div class="pixmax-canvas-cloner-video-history-meta">
           <div class="pixmax-canvas-cloner-video-history-time">${escapeHtml(formatVideoHistoryTime(item.createdAt || item.discoveredAt))}</div>
         </div>
@@ -1807,45 +1854,43 @@
     if (!videoHistoryMediaObserver && typeof IntersectionObserver === "function") {
       videoHistoryMediaObserver = new IntersectionObserver(handleVideoHistoryMediaVisibility, {
         root: root.closest(".pixmax-canvas-cloner-video-history-list"),
-        rootMargin: "160px 0px",
+        rootMargin: "48px 0px",
         threshold: 0.01
       });
     }
-    for (const video of root.querySelectorAll("video")) {
-      if (!video.__pixmaxCanvasClonerVideoHistoryLazyBound) {
-        video.__pixmaxCanvasClonerVideoHistoryLazyBound = true;
-        video.addEventListener("pointerdown", () => loadVideoHistoryVideo(video), { passive: true });
-        video.addEventListener("keydown", (event) => {
-          if (event.key === " " || event.key === "Enter") loadVideoHistoryVideo(video);
-        });
-        video.addEventListener("play", () => {
-          suspendOtherVideoHistoryMedia(video);
-          loadVideoHistoryVideo(video);
-          markVideoHistoryItemWatchedFromElement(video);
-        });
-      }
+    for (const preview of root.querySelectorAll("[data-video-history-preview='true']")) {
       if (videoHistoryMediaObserver) {
-        videoHistoryMediaObserver.observe(video);
+        videoHistoryMediaObserver.observe(preview);
       } else {
-        loadVideoHistoryPoster(video);
+        loadVideoHistoryPoster(preview);
       }
     }
   }
 
   function handleVideoHistoryMediaVisibility(entries) {
     for (const entry of entries) {
-      const video = entry.target;
+      const preview = entry.target;
       if (entry.isIntersecting && videoHistoryOpen) {
-        loadVideoHistoryPoster(video);
+        loadVideoHistoryPoster(preview);
       } else {
-        releaseVideoHistoryVideo(video, true);
+        releaseVideoHistoryPoster(preview);
       }
     }
   }
 
-  function loadVideoHistoryPoster(video) {
-    const poster = video?.dataset.poster || "";
-    if (poster && video.getAttribute("poster") !== poster) video.setAttribute("poster", poster);
+  function loadVideoHistoryPoster(media) {
+    const poster = media?.dataset.poster || "";
+    if (!poster) return;
+    if (String(media.tagName || "").toLowerCase() === "video") {
+      if (media.getAttribute("poster") !== poster) media.setAttribute("poster", poster);
+      return;
+    }
+    const image = media.querySelector?.("img");
+    if (image && image.getAttribute("src") !== poster) image.setAttribute("src", poster);
+  }
+
+  function releaseVideoHistoryPoster(preview) {
+    preview?.querySelector?.("img")?.removeAttribute("src");
   }
 
   function loadVideoHistoryVideo(video) {
@@ -1862,19 +1907,71 @@
     }
   }
 
-  function suspendOtherVideoHistoryMedia(activeVideo) {
-    const panel = videoHistoryPanelElement;
-    if (!panel) return;
-    for (const video of panel.querySelectorAll("video")) {
-      if (video !== activeVideo) releaseVideoHistoryVideo(video, true);
+  function createVideoHistoryPreview(src, poster) {
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "pixmax-canvas-cloner-video-history-preview";
+    preview.dataset.videoHistoryPreview = "true";
+    preview.dataset.videoHistoryAction = "play";
+    preview.dataset.src = src || "";
+    preview.dataset.poster = poster || "";
+    preview.setAttribute("aria-label", "播放历史视频");
+
+    const image = document.createElement("img");
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.fetchPriority = "low";
+    const play = document.createElement("span");
+    play.className = "pixmax-canvas-cloner-video-history-play";
+    play.setAttribute("aria-hidden", "true");
+    play.textContent = "▶";
+    preview.append(image, play);
+    return preview;
+  }
+
+  function restoreVideoHistoryPlayer(clearPoster = false) {
+    const video = videoHistoryActivePlayer;
+    videoHistoryActivePlayer = null;
+    if (!video?.isConnected) return;
+    const preview = createVideoHistoryPreview(video.dataset.src, video.dataset.poster);
+    releaseVideoHistoryVideo(video, true, true);
+    video.replaceWith(preview);
+    if (!clearPoster && videoHistoryOpen) {
+      if (videoHistoryMediaObserver) videoHistoryMediaObserver.observe(preview);
+      else loadVideoHistoryPoster(preview);
     }
+  }
+
+  function activateVideoHistoryPreview(preview) {
+    if (!preview?.dataset.src) return;
+    restoreVideoHistoryPlayer(true);
+
+    const video = document.createElement("video");
+    video.dataset.src = preview.dataset.src;
+    video.dataset.poster = preview.dataset.poster || "";
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    videoHistoryMediaObserver?.unobserve(preview);
+    preview.replaceWith(video);
+    videoHistoryActivePlayer = video;
+    loadVideoHistoryVideo(video);
+    video.play().catch(() => {});
   }
 
   function suspendVideoHistoryMedia(clearPosters = false) {
     const panel = videoHistoryPanelElement;
     if (!panel) return;
+    restoreVideoHistoryPlayer(clearPosters);
+    videoHistoryMediaObserver?.disconnect();
     for (const video of panel.querySelectorAll("video")) {
       releaseVideoHistoryVideo(video, true, clearPosters);
+    }
+    if (clearPosters) {
+      for (const preview of panel.querySelectorAll("[data-video-history-preview='true']")) {
+        releaseVideoHistoryPoster(preview);
+      }
     }
   }
 
@@ -1905,6 +2002,10 @@
     const card = event.target.closest(".pixmax-canvas-cloner-video-history-card");
     const item = videoHistoryItems.find((candidate) => getVideoHistoryItemKey(candidate) === card?.dataset.key);
     if (!item) return;
+    if (action === "play") {
+      activateVideoHistoryPreview(event.target.closest("[data-video-history-preview='true']"));
+      return;
+    }
     if (action === "focus") {
       focusVideoHistoryItem(item);
       return;
@@ -1932,7 +2033,7 @@
   function updateVideoHistoryUnreadMarks() {
     for (const card of document.querySelectorAll(".pixmax-canvas-cloner-video-history-card")) {
       const watchKey = card.dataset.watchKey || "";
-      card.dataset.unwatched = watchKey && unreadVideoKeys.has(watchKey) ? "true" : "false";
+      card.dataset.unwatched = isVideoUnwatched(watchKey) ? "true" : "false";
     }
   }
 
@@ -2049,6 +2150,7 @@
     try {
       const previousKeys = new Set(videoHistoryItems.map(getVideoHistoryItemKey).filter(Boolean));
       await loadCachedVideoHistory();
+      const cachedHistorySignature = JSON.stringify(videoHistoryItems);
       if (videoHistoryOpen) renderVideoHistoryPanel(options);
       for (const item of videoHistoryItems) {
         previousKeys.add(getVideoHistoryItemKey(item));
@@ -2057,7 +2159,9 @@
       const incoming = Array.isArray(result?.items) ? result.items : [];
       videoHistoryItems = mergeVideoHistoryItems(videoHistoryItems, incoming);
       const newItems = videoHistoryItems.filter((item) => !previousKeys.has(getVideoHistoryItemKey(item)));
-      await writeVideoHistoryStore(videoHistoryItems);
+      if (JSON.stringify(videoHistoryItems) !== cachedHistorySignature) {
+        await writeVideoHistoryStore(videoHistoryItems);
+      }
       if (videoHistoryHasLoadedOnce && newItems.length) {
         showToast(newItems.length === 1 ? "视频生成完成，已加入视频列表。" : `${newItems.length} 个视频生成完成，已加入视频列表。`);
         if (videoHistoryOpen) {
@@ -2074,10 +2178,10 @@
     }
   }
 
-  function scheduleVideoHistoryRefresh(delay = 1200) {
+  function scheduleVideoHistoryRefresh(delay = 1200, options = {}) {
     window.clearTimeout(videoHistoryRefreshTimer);
     videoHistoryRefreshTimer = window.setTimeout(() => {
-      refreshVideoHistory();
+      refreshVideoHistory(options);
     }, delay);
   }
 
@@ -2338,6 +2442,10 @@
     ];
   }
 
+  function isVideoUnwatched(watchKey) {
+    return Boolean(videoWatchStateReady && watchKey && !watchedVideoKeys.has(watchKey));
+  }
+
   function normalizeWatchedVideoCanvasBaselines(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     return Object.fromEntries(
@@ -2365,12 +2473,24 @@
   function getElementVideoWatchKey(video) {
     if (!video) return "";
     const directUrl = video.currentSrc || video.src || video.getAttribute?.("src") || "";
+    const sourceUrls = [...(video.querySelectorAll?.("source") ?? [])]
+      .map((source) => source.currentSrc || source.src || source.getAttribute("src") || "");
+    const signature = [directUrl, ...sourceUrls].join("|");
+    const cached = videoWatchKeyCache.get(video);
+    if (cached?.signature === signature) return cached.key;
     const key = extractVideoWatchKeyFromUrl(directUrl);
-    if (key) return key;
-    for (const source of video.querySelectorAll?.("source") ?? []) {
-      const sourceKey = extractVideoWatchKeyFromUrl(source.currentSrc || source.src || source.getAttribute("src"));
-      if (sourceKey) return sourceKey;
+    if (key) {
+      videoWatchKeyCache.set(video, { key, signature });
+      return key;
     }
+    for (const sourceUrl of sourceUrls) {
+      const sourceKey = extractVideoWatchKeyFromUrl(sourceUrl);
+      if (sourceKey) {
+        videoWatchKeyCache.set(video, { key: sourceKey, signature });
+        return sourceKey;
+      }
+    }
+    videoWatchKeyCache.set(video, { key: "", signature });
     return "";
   }
 
@@ -2383,96 +2503,160 @@
     return "";
   }
 
-  function applyNodeUnwatchedVideoState(node) {
-    if (!node) return;
-    const watchKey = getNodeVideoWatchKey(node);
-    if (videoWatchStateReady && watchKey && !knownVideoKeys.has(watchKey)) {
-      markVideoDiscovered(watchKey);
+  function collectVideoNodeWatchKeys(root = document) {
+    const entries = new Map();
+    const addVideo = (video) => {
+      if (!video || video.closest?.(`#${VIDEO_HISTORY_PANEL_ID}`)) return;
+      const node = video.closest?.(NODE_SELECTOR);
+      if (!node || entries.has(node)) return;
+      const watchKey = getElementVideoWatchKey(video);
+      if (watchKey) entries.set(node, watchKey);
+    };
+
+    if (String(root?.tagName || "").toLowerCase() === "video") addVideo(root);
+    for (const video of root?.querySelectorAll?.("video") ?? []) addVideo(video);
+    const parentNode = root?.closest?.(NODE_SELECTOR);
+    if (parentNode && !entries.has(parentNode)) {
+      for (const video of parentNode.querySelectorAll?.("video") ?? []) addVideo(video);
     }
-    const unwatched = Boolean(watchKey && unreadVideoKeys.has(watchKey));
+    return entries;
+  }
+
+  function applyNodeUnwatchedVideoState(node, watchKey = getNodeVideoWatchKey(node)) {
+    if (!node) return;
+    if (watchKey) trackedVideoNodeKeys.set(node, watchKey);
+    else trackedVideoNodeKeys.delete(node);
+    const unwatched = isVideoUnwatched(watchKey);
     node.classList.toggle("pixmax-canvas-cloner-unwatched-video", unwatched);
     if (unwatched) node.dataset.pixmaxClonerWatchKey = watchKey;
     else delete node.dataset.pixmaxClonerWatchKey;
+    return watchKey;
   }
 
-  function applyVisibleUnwatchedVideoMarks() {
-    for (const node of document.querySelectorAll(NODE_SELECTOR)) {
-      applyNodeUnwatchedVideoState(node);
+  function applyTrackedUnwatchedVideoMarks() {
+    for (const [node, watchKey] of trackedVideoNodeKeys) {
+      if (!node.isConnected) {
+        trackedVideoNodeKeys.delete(node);
+        continue;
+      }
+      applyNodeUnwatchedVideoState(node, watchKey);
     }
   }
 
-  function getVisibleVideoWatchKeys() {
-    return [
-      ...new Set(
-        [...document.querySelectorAll(NODE_SELECTOR)]
-          .map(getNodeVideoWatchKey)
-          .filter(Boolean)
-      )
-    ];
+  function applyVisibleUnwatchedVideoMarks(entries = collectVideoNodeWatchKeys(document)) {
+    for (const [node] of trackedVideoNodeKeys) {
+      if (!node.isConnected || !entries.has(node)) {
+        node.classList?.remove("pixmax-canvas-cloner-unwatched-video");
+        if (node.dataset) delete node.dataset.pixmaxClonerWatchKey;
+        trackedVideoNodeKeys.delete(node);
+      }
+    }
+    for (const [node, watchKey] of entries) applyNodeUnwatchedVideoState(node, watchKey);
+    if (videoWatchStateReady) markVideosDiscovered([...entries.values()]);
   }
 
   function applyUnwatchedVideoMarksInRoot(root) {
     if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
-    if (root.matches?.(NODE_SELECTOR)) applyNodeUnwatchedVideoState(root);
-    for (const node of root.querySelectorAll?.(NODE_SELECTOR) ?? []) {
-      applyNodeUnwatchedVideoState(node);
-    }
-    const parentNode = root.closest?.(NODE_SELECTOR);
-    if (parentNode) applyNodeUnwatchedVideoState(parentNode);
+    const entries = collectVideoNodeWatchKeys(root);
+    for (const [node, watchKey] of entries) applyNodeUnwatchedVideoState(node, watchKey);
+    if (videoWatchStateReady) markVideosDiscovered([...entries.values()]);
   }
 
-  async function refreshWatchedVideoState() {
-    videoWatchStateReady = false;
-    try {
-      watchedVideoOptions = await getSharedLikeOptions();
-      if (watchedVideoOptions.enabled) {
-        const result = await requestBridge("get-watched-video-state", watchedVideoOptions, 8000);
-        watchedVideoKeys = new Set(normalizeWatchedVideoKeys(result?.watchedVideoKeys));
-        knownVideoKeys = new Set(normalizeWatchedVideoKeys(result?.knownVideoKeys));
-        unreadVideoKeys = new Set(normalizeWatchedVideoKeys(result?.unreadVideoKeys));
-      } else {
-        const result = await storageGet({
-          [WATCHED_VIDEO_STORAGE_KEY]: [],
-          pixmaxKnownVideoKeys: [],
-          pixmaxUnreadVideoKeys: [],
-          [WATCHED_VIDEO_CANVAS_BASELINES_KEY]: {},
-          [KNOWN_VIDEO_CANVAS_MODEL_KEY]: ""
-        });
-        const baselines = normalizeWatchedVideoCanvasBaselines(result[WATCHED_VIDEO_CANVAS_BASELINES_KEY]);
-        const hasKnownModel = Boolean(result[KNOWN_VIDEO_CANVAS_MODEL_KEY]);
-        const canvasKey = getCurrentFileUuid() || location.pathname;
-        const nextWatchedKeys = new Set(normalizeWatchedVideoKeys(result[WATCHED_VIDEO_STORAGE_KEY]));
-        const nextKnownKeys = new Set(normalizeWatchedVideoKeys(result.pixmaxKnownVideoKeys));
-        const nextUnreadKeys = new Set(normalizeWatchedVideoKeys(result.pixmaxUnreadVideoKeys));
-        if (!hasKnownModel || (canvasKey && !baselines[canvasKey])) {
-          if (!hasKnownModel) nextUnreadKeys.clear();
-          for (const key of getVisibleVideoWatchKeys()) nextKnownKeys.add(key);
-          if (canvasKey) baselines[canvasKey] = new Date().toISOString();
-          storageSet({
-            [KNOWN_VIDEO_CANVAS_MODEL_KEY]: result[KNOWN_VIDEO_CANVAS_MODEL_KEY] || new Date().toISOString(),
-            pixmaxKnownVideoKeys: [...nextKnownKeys],
-            [WATCHED_VIDEO_CANVAS_BASELINES_KEY]: baselines
-          }).catch(() => {});
+  function syncUnwatchedVideoRoots() {
+    unwatchedVideoSyncScheduled = false;
+    const roots = [...pendingUnwatchedVideoRoots];
+    pendingUnwatchedVideoRoots.clear();
+    for (const root of roots) applyUnwatchedVideoMarksInRoot(root);
+  }
+
+  function scheduleUnwatchedVideoSync(root) {
+    if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
+    pendingUnwatchedVideoRoots.add(root);
+    if (unwatchedVideoSyncScheduled) return;
+    unwatchedVideoSyncScheduled = true;
+    window.requestAnimationFrame(syncUnwatchedVideoRoots);
+  }
+
+  async function refreshWatchedVideoState(options = {}) {
+    if (watchedVideoRefreshPromise) return watchedVideoRefreshPromise;
+    const refreshAge = Date.now() - watchedVideoLastRefreshAt;
+    if (!options.force && videoWatchStateReady && refreshAge < 30000) {
+      applyTrackedUnwatchedVideoMarks();
+      return;
+    }
+
+    watchedVideoRefreshPromise = (async () => {
+      videoWatchStateReady = false;
+      let visibleVideoEntries = new Map();
+      try {
+        visibleVideoEntries = collectVideoNodeWatchKeys(document);
+        const visibleWatchKeys = [...new Set(visibleVideoEntries.values())];
+        watchedVideoOptions = await getSharedLikeOptions();
+        if (watchedVideoOptions.enabled) {
+          const result = await requestBridge(
+            "get-watched-video-state",
+            { ...watchedVideoOptions, visibleWatchKeys },
+            8000
+          );
+          watchedVideoKeys = new Set(normalizeWatchedVideoKeys(result?.watchedVideoKeys));
+          knownVideoKeys = new Set(normalizeWatchedVideoKeys(result?.knownVideoKeys));
+          unreadVideoKeys = new Set(normalizeWatchedVideoKeys(result?.unreadVideoKeys));
         } else {
-          for (const key of getVisibleVideoWatchKeys()) {
-            if (nextKnownKeys.has(key)) continue;
-            nextKnownKeys.add(key);
-            if (!nextWatchedKeys.has(key)) nextUnreadKeys.add(key);
+          const result = await storageGet({
+            [WATCHED_VIDEO_STORAGE_KEY]: [],
+            pixmaxKnownVideoKeys: [],
+            pixmaxUnreadVideoKeys: [],
+            [WATCHED_VIDEO_CANVAS_BASELINES_KEY]: {},
+            [KNOWN_VIDEO_CANVAS_MODEL_KEY]: ""
+          });
+          const baselines = normalizeWatchedVideoCanvasBaselines(result[WATCHED_VIDEO_CANVAS_BASELINES_KEY]);
+          const hasKnownModel = Boolean(result[KNOWN_VIDEO_CANVAS_MODEL_KEY]);
+          const canvasKey = getCurrentFileUuid() || location.pathname;
+          const nextWatchedKeys = new Set(normalizeWatchedVideoKeys(result[WATCHED_VIDEO_STORAGE_KEY]));
+          const nextKnownKeys = new Set(normalizeWatchedVideoKeys(result.pixmaxKnownVideoKeys));
+          const nextUnreadKeys = new Set(normalizeWatchedVideoKeys(result.pixmaxUnreadVideoKeys));
+          if (!hasKnownModel || (canvasKey && !baselines[canvasKey])) {
+            if (!hasKnownModel) nextUnreadKeys.clear();
+            for (const key of visibleWatchKeys) nextKnownKeys.add(key);
+            if (canvasKey) baselines[canvasKey] = new Date().toISOString();
+            storageSet({
+              [KNOWN_VIDEO_CANVAS_MODEL_KEY]: result[KNOWN_VIDEO_CANVAS_MODEL_KEY] || new Date().toISOString(),
+              pixmaxKnownVideoKeys: [...nextKnownKeys],
+              [WATCHED_VIDEO_CANVAS_BASELINES_KEY]: baselines
+            }).catch(() => {});
+          } else {
+            let changed = false;
+            for (const key of visibleWatchKeys) {
+              if (nextKnownKeys.has(key)) continue;
+              nextKnownKeys.add(key);
+              if (!nextWatchedKeys.has(key)) nextUnreadKeys.add(key);
+              changed = true;
+            }
+            if (changed) {
+              storageSet({
+                pixmaxKnownVideoKeys: [...nextKnownKeys],
+                pixmaxUnreadVideoKeys: [...nextUnreadKeys]
+              }).catch(() => {});
+            }
           }
-          storageSet({
-            pixmaxKnownVideoKeys: [...nextKnownKeys],
-            pixmaxUnreadVideoKeys: [...nextUnreadKeys]
-          }).catch(() => {});
+          watchedVideoKeys = nextWatchedKeys;
+          knownVideoKeys = nextKnownKeys;
+          unreadVideoKeys = nextUnreadKeys;
         }
-        watchedVideoKeys = nextWatchedKeys;
-        knownVideoKeys = nextKnownKeys;
-        unreadVideoKeys = nextUnreadKeys;
+      } finally {
+        videoWatchStateReady = true;
+        watchedVideoLastRefreshAt = Date.now();
+        applyVisibleUnwatchedVideoMarks(visibleVideoEntries);
+        updateVideoHistoryUnreadMarks();
       }
-      videoWatchStateReady = true;
-      applyVisibleUnwatchedVideoMarks();
+    })();
+
+    try {
+      await watchedVideoRefreshPromise;
     } catch {
-      videoWatchStateReady = true;
-      applyVisibleUnwatchedVideoMarks();
+      // Keep cached watch state when the shared source is temporarily unavailable.
+    } finally {
+      watchedVideoRefreshPromise = null;
     }
   }
 
@@ -2482,7 +2666,8 @@
     watchedVideoKeys.add(watchKey);
     knownVideoKeys.add(watchKey);
     unreadVideoKeys.delete(watchKey);
-    applyVisibleUnwatchedVideoMarks();
+    applyTrackedUnwatchedVideoMarks();
+    updateVideoHistoryUnreadMarks();
     if (watchedVideoOptions?.enabled) {
       requestBridge("mark-video-watched", { ...watchedVideoOptions, watchKey }, 8000)
         .then((result) => {
@@ -2490,7 +2675,8 @@
             watchedVideoKeys = new Set(normalizeWatchedVideoKeys(result.watchedVideoKeys));
             knownVideoKeys = new Set(normalizeWatchedVideoKeys(result.knownVideoKeys));
             unreadVideoKeys = new Set(normalizeWatchedVideoKeys(result.unreadVideoKeys));
-            applyVisibleUnwatchedVideoMarks();
+            applyTrackedUnwatchedVideoMarks();
+            updateVideoHistoryUnreadMarks();
           }
         })
         .catch(() => {});
@@ -2504,18 +2690,38 @@
     }).catch(() => {});
   }
 
-  function markVideoDiscovered(watchKey) {
-    if (!watchKey || knownVideoKeys.has(watchKey)) return;
-    knownVideoKeys.add(watchKey);
-    if (!watchedVideoKeys.has(watchKey)) unreadVideoKeys.add(watchKey);
+  function markVideosDiscovered(values) {
+    let queued = false;
+    for (const watchKey of normalizeWatchedVideoKeys(values)) {
+      if (knownVideoKeys.has(watchKey) || pendingDiscoveredVideoKeys.has(watchKey)) continue;
+      pendingDiscoveredVideoKeys.add(watchKey);
+      queued = true;
+    }
+    if (!queued || discoveredVideoFlushTimer) return;
+    discoveredVideoFlushTimer = window.setTimeout(flushDiscoveredVideoKeys, 80);
+  }
+
+  function flushDiscoveredVideoKeys() {
+    window.clearTimeout(discoveredVideoFlushTimer);
+    discoveredVideoFlushTimer = 0;
+    const watchKeys = [...pendingDiscoveredVideoKeys];
+    pendingDiscoveredVideoKeys.clear();
+    if (!watchKeys.length) return;
+    for (const watchKey of watchKeys) {
+      knownVideoKeys.add(watchKey);
+      if (!watchedVideoKeys.has(watchKey)) unreadVideoKeys.add(watchKey);
+    }
+    applyTrackedUnwatchedVideoMarks();
+    updateVideoHistoryUnreadMarks();
     if (watchedVideoOptions?.enabled) {
-      requestBridge("mark-video-discovered", { ...watchedVideoOptions, watchKey }, 8000)
+      requestBridge("mark-videos-discovered", { ...watchedVideoOptions, watchKeys }, 8000)
         .then((result) => {
           if (result?.knownVideoKeys) {
             watchedVideoKeys = new Set(normalizeWatchedVideoKeys(result.watchedVideoKeys));
             knownVideoKeys = new Set(normalizeWatchedVideoKeys(result.knownVideoKeys));
             unreadVideoKeys = new Set(normalizeWatchedVideoKeys(result.unreadVideoKeys));
-            applyVisibleUnwatchedVideoMarks();
+            applyTrackedUnwatchedVideoMarks();
+            updateVideoHistoryUnreadMarks();
           }
         })
         .catch(() => {});
@@ -2531,15 +2737,18 @@
   function handleVideoPlay(event) {
     const video = event.target;
     if (!video || String(video.tagName || "").toLowerCase() !== "video") return;
+    if (video.closest?.(`#${VIDEO_HISTORY_PANEL_ID}`)) {
+      markVideoHistoryItemWatchedFromElement(video);
+      return;
+    }
     const watchKey = getElementVideoWatchKey(video) || getNodeVideoWatchKey(video.closest?.(NODE_SELECTOR));
     markVideoWatched(watchKey);
-    markVideoHistoryItemWatchedFromElement(video);
   }
 
   function handleVideoMetadata(event) {
     const video = event.target;
     if (!video || String(video.tagName || "").toLowerCase() !== "video") return;
-    applyNodeUnwatchedVideoState(video.closest?.(NODE_SELECTOR));
+    applyUnwatchedVideoMarksInRoot(video);
     if (video.closest?.(NODE_SELECTOR)) {
       scheduleVideoHistoryRefresh(900);
     }
@@ -3979,7 +4188,6 @@
         likedKeys.has(node.dataset.id),
         likedColors.get(node.dataset.id)
       );
-      applyNodeUnwatchedVideoState(node);
     }
     for (const toolbar of document.querySelectorAll(TOOLBAR_SELECTOR)) {
       applyToolbarLikedState(toolbar);
@@ -3996,7 +4204,6 @@
         likedKeys.has(root.dataset.id),
         likedColors.get(root.dataset.id)
       );
-      applyNodeUnwatchedVideoState(root);
     }
 
     for (const node of root.querySelectorAll?.(NODE_SELECTOR) ?? []) {
@@ -4005,7 +4212,6 @@
         likedKeys.has(node.dataset.id),
         likedColors.get(node.dataset.id)
       );
-      applyNodeUnwatchedVideoState(node);
     }
 
     const parentNode = root.closest?.(NODE_SELECTOR);
@@ -4015,7 +4221,6 @@
         likedKeys.has(parentNode.dataset.id),
         likedColors.get(parentNode.dataset.id)
       );
-      applyNodeUnwatchedVideoState(parentNode);
     }
   }
 
@@ -5089,12 +5294,15 @@
     scheduleOpenLikesButtonRetries();
     loadPerformanceModeSetting();
     loadCachedVideoHistory()
-      .then(() => renderVideoHistoryPanel())
+      .then(() => {
+        if (videoHistoryOpen) renderVideoHistoryPanel();
+      })
       .catch(() => {});
     refreshLikedState();
     syncLiveCollabState();
     focusNode(getFocusNodeId());
     globalThis.chrome?.storage?.onChanged?.addListener((changes, areaName) => {
+      let videoWatchStateChanged = false;
       if (areaName === "local" && changes[LIKES_STORAGE_KEY]) {
         const items = Array.isArray(changes[LIKES_STORAGE_KEY].newValue)
           ? changes[LIKES_STORAGE_KEY].newValue
@@ -5112,8 +5320,7 @@
       }
       if (areaName === "local" && changes[WATCHED_VIDEO_STORAGE_KEY]) {
         watchedVideoKeys = new Set(normalizeWatchedVideoKeys(changes[WATCHED_VIDEO_STORAGE_KEY].newValue));
-        applyVisibleUnwatchedVideoMarks();
-        updateVideoHistoryUnreadMarks();
+        videoWatchStateChanged = true;
       }
       if (areaName === "local" && (changes.pixmaxKnownVideoKeys || changes.pixmaxUnreadVideoKeys)) {
         if (changes.pixmaxKnownVideoKeys) {
@@ -5122,7 +5329,10 @@
         if (changes.pixmaxUnreadVideoKeys) {
           unreadVideoKeys = new Set(normalizeWatchedVideoKeys(changes.pixmaxUnreadVideoKeys.newValue));
         }
-        applyVisibleUnwatchedVideoMarks();
+        videoWatchStateChanged = true;
+      }
+      if (videoWatchStateChanged) {
+        applyTrackedUnwatchedVideoMarks();
         updateVideoHistoryUnreadMarks();
       }
       if (areaName === "local" && changes[VIDEO_HISTORY_STORAGE_KEY]) {
@@ -5140,7 +5350,7 @@
           changes.sharedLikesColor)
       ) {
         refreshLikedState();
-        refreshWatchedVideoState();
+        refreshWatchedVideoState({ force: true });
       }
       if (
         areaName === "sync" &&
@@ -5181,13 +5391,18 @@
       true
     );
     new MutationObserver((mutations) => {
+      const pageMutations = mutations.filter((mutation) => (
+        !(mutation.target instanceof Element) ||
+        !mutation.target.closest(`#${VIDEO_HISTORY_PANEL_ID}`)
+      ));
+      if (!pageMutations.length) return;
       scheduleLegacyCleanup();
       ensureTopActionButtons();
       scheduleVideoHistoryEntrySync();
       autoResolveCollaborationConflict();
       scheduleOfficialPresenceAppearance();
       neutralizeOfficialFocusColors();
-      for (const mutation of mutations) {
+      for (const mutation of pageMutations) {
         if (mutation.type !== "childList") continue;
         const addedElements = [...mutation.addedNodes].filter((node) => node.nodeType === Node.ELEMENT_NODE);
         if (
@@ -5205,7 +5420,7 @@
       }
       if (performanceModeEnabled) {
         let shouldRefreshPerformance = false;
-        for (const mutation of mutations) {
+        for (const mutation of pageMutations) {
           if (mutation.type === "childList") {
             markPerformanceCacheDirty();
             shouldRefreshPerformance = true;
@@ -5220,7 +5435,7 @@
         if (shouldRefreshPerformance) schedulePerformanceUpdate(80);
       }
       if (liveOptions?.enabled) {
-        for (const mutation of mutations) {
+        for (const mutation of pageMutations) {
           if (
             mutation.type === "attributes" &&
             (mutation.attributeName === "aria-selected" ||
@@ -5232,10 +5447,22 @@
           }
         }
       }
-      for (const mutation of mutations) {
+      for (const mutation of pageMutations) {
+        if (mutation.type === "attributes" && mutation.attributeName === "src") {
+          const videoRoot = String(mutation.target?.tagName || "").toLowerCase() === "source"
+            ? mutation.target.closest?.("video")
+            : mutation.target;
+          scheduleUnwatchedVideoSync(videoRoot);
+        }
         scheduleToolbarSync(mutation.target);
         schedulePromptToolsSync(mutation.target);
         for (const node of mutation.addedNodes) {
+          if (
+            node.nodeType === Node.ELEMENT_NODE &&
+            (node.matches?.("video, source") || node.querySelector?.("video"))
+          ) {
+            scheduleUnwatchedVideoSync(node);
+          }
           scheduleToolbarSync(node);
           schedulePromptToolsSync(node);
         }
