@@ -1372,10 +1372,12 @@
     }
 
     if (ownerNode && sourceFileUuid) {
+      const suppliedSourceKeys = Array.isArray(payload?.visibleWatchKeys)
+        ? normalizeVideoKeys(payload.visibleWatchKeys)
+        : null;
       if (sourceFileUuid) {
         try {
-          const sourceCanvas = await fetchCanvas(sourceFileUuid);
-          const sourceKeys = getCanvasVideoWatchKeys(sourceCanvas);
+          const sourceKeys = suppliedSourceKeys || getCanvasVideoWatchKeys(await fetchCanvas(sourceFileUuid));
           if (!hasKnownModel || !canvasBaselines[sourceFileUuid]) {
             knownVideoKeys = normalizeVideoKeys([...knownVideoKeys, ...sourceKeys]);
             canvasBaselines[sourceFileUuid] = new Date().toISOString();
@@ -1519,6 +1521,46 @@
     const unreadVideoKeys = getUnreadVideoKeys(settings);
     if (!knownVideoKeys.includes(watchKey)) knownVideoKeys.push(watchKey);
     if (!watchedVideoKeys.includes(watchKey) && !unreadVideoKeys.includes(watchKey)) unreadVideoKeys.push(watchKey);
+
+    await persistWatchedVideoSettings(fileUuid, canvas, ownerName, ownerNode, parsed, color, {
+      ...settings,
+      knownVideoModelAt: settings.knownVideoModelAt || new Date().toISOString(),
+      knownVideoKeys,
+      unreadVideoKeys,
+      watchedVideoKeys
+    }, retryCount);
+
+    return { knownVideoKeys, unreadVideoKeys, watchedVideoKeys };
+  }
+
+  async function markVideosDiscovered(payload, retryCount = 1) {
+    const { color, fileUuid, ownerName } = parseSharedOptions(payload);
+    const watchKeys = normalizeVideoKeys(payload?.watchKeys);
+    if (!watchKeys.length) return getWatchedVideoState(payload);
+
+    const canvas = await fetchCanvas(fileUuid);
+    const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], ownerName);
+    if (!ownerNode) {
+      throw new Error(`共享画布里找不到名字为「${ownerName}」的文字节点。`);
+    }
+
+    const parsed = parseSharedLikeText(getRawNodeText(ownerNode));
+    const settings = parsed?.settings && typeof parsed.settings === "object" ? parsed.settings : {};
+    const watchedVideoKeys = getWatchedVideoKeys(settings);
+    const knownVideoKeys = getKnownVideoKeys(settings);
+    const unreadVideoKeys = getUnreadVideoKeys(settings);
+    let changed = false;
+    for (const watchKey of watchKeys) {
+      if (!knownVideoKeys.includes(watchKey)) {
+        knownVideoKeys.push(watchKey);
+        changed = true;
+      }
+      if (!watchedVideoKeys.includes(watchKey) && !unreadVideoKeys.includes(watchKey)) {
+        unreadVideoKeys.push(watchKey);
+        changed = true;
+      }
+    }
+    if (!changed) return { knownVideoKeys, unreadVideoKeys, watchedVideoKeys };
 
     await persistWatchedVideoSettings(fileUuid, canvas, ownerName, ownerNode, parsed, color, {
       ...settings,
@@ -2309,6 +2351,11 @@
 
       if (action === "mark-video-discovered") {
         respond(requestId, true, await markVideoDiscovered(payload));
+        return;
+      }
+
+      if (action === "mark-videos-discovered") {
+        respond(requestId, true, await markVideosDiscovered(payload));
         return;
       }
 

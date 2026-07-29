@@ -114,7 +114,9 @@ function init() {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local" && changes[LIKES_STORAGE_KEY]) {
       if (sharedMode) return;
+      const viewport = captureGridViewport();
       setActiveItems(changes[LIKES_STORAGE_KEY].newValue || []);
+      restoreGridViewport(viewport);
     }
     if (
       areaName === "sync" &&
@@ -249,6 +251,44 @@ function renderFilteredItems() {
     ...activeRenderOptions,
     filteredCount: activeSourceItems.length
   });
+}
+
+function captureGridViewport() {
+  const cards = [...grid.querySelectorAll(".card")];
+  const anchor = cards.find((card) => {
+    const rect = card.getBoundingClientRect();
+    return rect.bottom > 0 && rect.top < window.innerHeight;
+  });
+
+  return {
+    anchorKey: anchor?.dataset.likeKey || "",
+    anchorTop: anchor?.getBoundingClientRect().top || 0,
+    scrollY: window.scrollY
+  };
+}
+
+function restoreGridViewport(viewport) {
+  if (!viewport) return;
+
+  const restore = () => {
+    const anchor = viewport.anchorKey
+      ? [...grid.querySelectorAll(".card")].find((card) => card.dataset.likeKey === viewport.anchorKey)
+      : null;
+    if (anchor) {
+      window.scrollBy(0, anchor.getBoundingClientRect().top - viewport.anchorTop);
+      return;
+    }
+    window.scrollTo(0, viewport.scrollY);
+  };
+
+  restore();
+  window.requestAnimationFrame(restore);
+}
+
+async function loadLikesPreservingViewport() {
+  const viewport = captureGridViewport();
+  await loadLikes();
+  restoreGridViewport(viewport);
 }
 
 function filterItems(items) {
@@ -602,10 +642,10 @@ function renderReviewPanel(item, card, ribbon) {
       button.disabled = true;
       try {
         await setReviewStatus(item, nextStatus === status ? "" : nextStatus);
-        loadLikes();
+        await loadLikesPreservingViewport();
       } catch (error) {
         button.textContent = error.message || "Failed";
-        window.setTimeout(loadLikes, 1200);
+        window.setTimeout(loadLikesPreservingViewport, 1200);
       }
     });
   }
@@ -623,7 +663,7 @@ function renderReviewPanel(item, card, ribbon) {
     try {
       await addReviewTags(item, tags);
       input.value = "";
-      loadLikes();
+      await loadLikesPreservingViewport();
     } catch (error) {
       input.value = error.message || input.value;
       window.setTimeout(() => {
@@ -657,10 +697,10 @@ function renderTagChips(item, wrapper) {
       button.disabled = true;
       try {
         await removeReviewTag(item, tag);
-        loadLikes();
+        await loadLikesPreservingViewport();
       } catch (error) {
         button.textContent = error.message || "Remove failed";
-        window.setTimeout(loadLikes, 1200);
+        window.setTimeout(loadLikesPreservingViewport, 1200);
       }
     });
     wrapper.append(button);
@@ -700,10 +740,10 @@ function renderSocial(item, card) {
     setSocialLikeButtonState(likeButton, item.socialLikedByMe, socialLikes.length, item.socialLikedByMe ? "Removing..." : "Liking...");
     try {
       await toggleSocialLike(item);
-      loadLikes();
+      await loadLikesPreservingViewport();
     } catch (error) {
       likeButton.textContent = error.message || "Action failed";
-      window.setTimeout(loadLikes, 1200);
+      window.setTimeout(loadLikesPreservingViewport, 1200);
     }
   });
 
@@ -724,7 +764,7 @@ function renderSocial(item, card) {
     try {
       await addSocialComment(item, text);
       input.value = "";
-      loadLikes();
+      await loadLikesPreservingViewport();
     } catch (error) {
       input.value = error.message || "Comment failed";
       window.setTimeout(() => {
