@@ -13,11 +13,14 @@
   const FOCUS_ZOOM_PARAM = "pixmaxClonerFocusZoom";
   const ACTIONS_CLASS = "pixmax-canvas-cloner-actions";
   const CONTEXT_PASTE_CLASS = "pixmax-canvas-cloner-context-paste";
+  const PROMPT_TOOLS_CLASS = "pixmax-canvas-cloner-prompt-tools";
+  const PROMPT_EDITOR_CLASS = "pixmax-canvas-cloner-prompt-editor";
+  const PROMPT_TOOLS_HOST_CLASS = "pixmax-canvas-cloner-prompt-tools-host";
   const STYLE_ID = "pixmax-canvas-cloner-style";
   const OFFICIAL_FOCUS_STYLE_ID = "collab-remote-focus-styles";
   const LIVE_FOCUS_STYLE_ID = "pixmax-canvas-cloner-live-focus-colors";
   const LIVE_SELECTION_STYLE_ID = "pixmax-canvas-cloner-live-selection-color";
-  const STYLE_VERSION = "1.4.29";
+  const STYLE_VERSION = "1.4.34";
   const TOAST_ID = "pixmax-canvas-cloner-toast";
   const LIVE_TOGGLE_ID = "pixmax-canvas-cloner-live-toggle";
   const OPEN_LIKES_BUTTON_ID = "pixmax-canvas-cloner-open-likes";
@@ -68,6 +71,7 @@
   const requests = new Map();
   const extensionRequests = new Map();
   const pendingToolbarRoots = new Set();
+  const pendingPromptToolRoots = new Set();
   let likedKeys = new Set();
   let ownLikedKeys = new Set();
   let likedColors = new Map();
@@ -78,6 +82,7 @@
   let videoWatchStateReady = false;
   let toolbarSyncScheduled = false;
   let contextPasteSyncScheduled = false;
+  let promptToolsSyncScheduled = false;
   let legacyCleanupScheduled = false;
   let videoHistoryItems = [];
   let videoHistoryVisibleCount = VIDEO_HISTORY_PAGE_SIZE;
@@ -88,7 +93,12 @@
   let videoHistoryRefreshTimer = 0;
   let videoHistoryPanelElement = null;
   let videoHistoryRenderedKey = "";
-  let videoHistoryPositionTimers = new Set();
+  let videoHistoryTabsContainer = null;
+  let videoHistoryPanelShell = null;
+  let videoHistoryLayoutObserver = null;
+  let videoHistoryObservedContainer = null;
+  let videoHistoryObservedShell = null;
+  let videoHistoryMediaObserver = null;
   let videoHistoryPositionScheduled = false;
   let officialViewportPersistTimers = new Set();
   let performanceModeEnabled = false;
@@ -360,6 +370,121 @@
         100% { filter: brightness(1); box-shadow: 0 0 0 3px var(--pixmax-cloner-like-color, #ff3864), 0 0 0 7px var(--pixmax-cloner-like-glow, rgb(255 56 100 / 22%)); }
       }
       .${CONTEXT_PASTE_CLASS} { color: #75e9f4 !important; }
+      .${PROMPT_EDITOR_CLASS}::selection {
+        background: #ffd84d;
+        color: #151515;
+      }
+      .${PROMPT_TOOLS_CLASS} {
+        position: relative;
+        z-index: 30;
+        display: inline-flex;
+        align-items: center;
+        width: auto;
+        margin-left: 8px;
+        color: #dfe4eb;
+        pointer-events: none;
+        vertical-align: middle;
+        font: 11px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .${PROMPT_TOOLS_CLASS}[data-open="true"] {
+        width: auto;
+      }
+      .${PROMPT_TOOLS_CLASS} .pixmax-prompt-tools-toggle {
+        display: flex;
+        min-width: 0;
+        height: 30px;
+        margin-left: auto;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid rgb(255 255 255 / 16%);
+        border-radius: 999px;
+        padding: 0 12px;
+        background: rgb(31 34 39 / 88%);
+        color: #d9dee6;
+        box-shadow: 0 5px 18px rgb(0 0 0 / 28%);
+        backdrop-filter: blur(10px);
+        pointer-events: auto;
+      }
+      .${PROMPT_TOOLS_CLASS} .pixmax-prompt-tools-toggle svg {
+        width: 14px;
+        height: 14px;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-width: 1.8;
+      }
+      .${PROMPT_TOOLS_CLASS}[data-open="true"] .pixmax-prompt-tools-toggle {
+        border-color: rgb(117 233 244 / 48%);
+        background: rgb(39 43 49 / 96%);
+        color: #75e9f4;
+      }
+      .${PROMPT_TOOLS_CLASS} .pixmax-prompt-tools-panel {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        display: none;
+        grid-template-columns: minmax(150px, 1fr) 52px 52px 62px 62px;
+        gap: 6px;
+        width: min(560px, calc(100vw - 48px));
+        padding: 8px;
+        border: 1px solid rgb(255 255 255 / 14%);
+        border-radius: 10px;
+        background: rgb(24 27 31 / 96%);
+        box-shadow: 0 12px 32px rgb(0 0 0 / 42%);
+        box-sizing: border-box;
+        backdrop-filter: blur(14px);
+        pointer-events: auto;
+      }
+      .${PROMPT_TOOLS_CLASS}[data-open="true"] .pixmax-prompt-tools-panel {
+        display: grid;
+      }
+      .${PROMPT_TOOLS_CLASS} input {
+        min-width: 0;
+        height: 27px;
+        border: 1px solid #3a3e45;
+        border-radius: 6px;
+        padding: 0 7px;
+        outline: none;
+        background: #202328;
+        color: #f5f7fa;
+        box-sizing: border-box;
+        font: inherit;
+      }
+      .${PROMPT_TOOLS_CLASS} input:focus {
+        border-color: #ffd84d;
+        box-shadow: 0 0 0 2px rgb(255 216 77 / 14%);
+      }
+      .${PROMPT_TOOLS_CLASS} button {
+        min-width: 27px;
+        height: 27px;
+        border: 1px solid #3a3e45;
+        border-radius: 6px;
+        padding: 0 7px;
+        background: #292d33;
+        color: #e7ebf0;
+        cursor: pointer;
+        white-space: nowrap;
+        font: inherit;
+      }
+      .${PROMPT_TOOLS_CLASS} button:hover {
+        border-color: #656b75;
+        background: #343941;
+      }
+      .${PROMPT_TOOLS_CLASS} button:disabled {
+        cursor: default;
+        opacity: .42;
+      }
+      .${PROMPT_TOOLS_CLASS} .pixmax-prompt-replace-input {
+        grid-column: 1 / 3;
+      }
+      .${PROMPT_TOOLS_CLASS} .pixmax-prompt-match-count {
+        display: inline-flex;
+        min-width: 38px;
+        align-items: center;
+        justify-content: center;
+        color: #ffd84d;
+        white-space: nowrap;
+      }
       #${TOAST_ID} {
         position: fixed;
         right: 22px;
@@ -640,6 +765,9 @@
       }
       .pixmax-canvas-cloner-video-history-card {
         position: relative;
+        contain: layout paint style;
+        content-visibility: auto;
+        contain-intrinsic-size: auto 360px;
         border: 1px solid #30343b;
         border-radius: 8px;
         margin-bottom: 12px;
@@ -1268,6 +1396,7 @@
   }
 
   function findCanvasTabsContainer() {
+    if (videoHistoryTabsContainer?.isConnected) return videoHistoryTabsContainer;
     const elements = [...document.querySelectorAll("button, [role='tab'], div, span")];
     const canvasTab = elements.find((element) => (
       element.id !== VIDEO_HISTORY_BUTTON_ID &&
@@ -1281,9 +1410,11 @@
         isVisibleVideoHistoryTabContainer(container) &&
         children.some((child) => child.textContent?.trim() === "节点" && isVisibleVideoHistoryTabCandidate(child))
       ) {
+        videoHistoryTabsContainer = container;
         return container;
       }
     }
+    videoHistoryTabsContainer = null;
     return null;
   }
 
@@ -1452,11 +1583,15 @@
   function mountVideoHistoryPanel(panel) {
     const container = findCanvasTabsContainer();
     if (container?.isConnected) {
-      const shell = findVideoHistoryPanelShell(container, container.getBoundingClientRect());
+      const shell = videoHistoryPanelShell?.isConnected && videoHistoryPanelShell.contains(container)
+        ? videoHistoryPanelShell
+        : findVideoHistoryPanelShell(container, container.getBoundingClientRect());
       if (shell?.isConnected) {
+        videoHistoryPanelShell = shell;
         prepareVideoHistoryPanelShell(shell);
         if (panel.parentElement !== shell) shell.appendChild(panel);
         panel.dataset.embedded = "true";
+        observeVideoHistoryLayout(container, shell);
         if (videoHistoryOpen) scheduleVideoHistoryPanelPositioning();
       } else {
         panel.dataset.embedded = "false";
@@ -1480,6 +1615,8 @@
       videoHistoryVisibleCount = VIDEO_HISTORY_PAGE_SIZE;
       renderVideoHistoryPanel({ stickToBottom: true });
       refreshVideoHistory({ stickToBottom: true });
+    } else {
+      suspendVideoHistoryMedia(true);
     }
   }
 
@@ -1499,6 +1636,8 @@
       return;
     }
     if (videoHistoryRenderedKey !== nextRenderKey || !list.querySelector(".pixmax-canvas-cloner-video-history-card")) {
+      suspendVideoHistoryMedia(true);
+      videoHistoryMediaObserver?.disconnect();
       list.innerHTML = visibleItems.map(renderVideoHistoryCard).join("");
       videoHistoryRenderedKey = nextRenderKey;
       hydrateVideoHistoryCards(list);
@@ -1533,7 +1672,7 @@
     const color = likedColors.get(item.nodeId) || DEFAULT_LIKE_COLOR;
     return `
       <article class="pixmax-canvas-cloner-video-history-card" data-key="${escapeHtmlAttribute(key)}" data-watch-key="${escapeHtmlAttribute(item.watchKey)}" data-node-id="${escapeHtmlAttribute(item.nodeId)}" data-unwatched="${unwatched ? "true" : "false"}">
-        <video data-src="${escapeHtmlAttribute(item.url)}" poster="${escapeHtmlAttribute(item.poster)}" controls playsinline preload="none"></video>
+        <video data-src="${escapeHtmlAttribute(item.url)}" data-poster="${escapeHtmlAttribute(item.poster)}" controls playsinline preload="none"></video>
         <div class="pixmax-canvas-cloner-video-history-meta">
           <div class="pixmax-canvas-cloner-video-history-time">${escapeHtml(formatVideoHistoryTime(item.createdAt || item.discoveredAt))}</div>
         </div>
@@ -1550,11 +1689,13 @@
     const panel = document.getElementById(VIDEO_HISTORY_PANEL_ID);
     if (!panel) return;
     if (panel.dataset.embedded === "true") {
-      const container = findCanvasTabsContainer();
+      const container = videoHistoryTabsContainer?.isConnected
+        ? videoHistoryTabsContainer
+        : findCanvasTabsContainer();
       const tabRect = container?.getBoundingClientRect?.();
       const shell = panel.parentElement !== document.body
         ? panel.parentElement
-        : findVideoHistoryPanelShell(container, tabRect);
+        : (videoHistoryPanelShell?.isConnected ? videoHistoryPanelShell : findVideoHistoryPanelShell(container, tabRect));
       const shellRect = shell?.getBoundingClientRect?.();
       if (!tabRect || !shellRect) return;
       const top = Math.max(0, Math.round(tabRect.bottom - shellRect.top));
@@ -1567,18 +1708,23 @@
   }
 
   function scheduleVideoHistoryPanelPositioning() {
-    if (videoHistoryPositionScheduled) return;
+    if (!videoHistoryOpen || videoHistoryPositionScheduled) return;
     videoHistoryPositionScheduled = true;
-    videoHistoryPositionTimers = new Set();
-    window.requestAnimationFrame(() => positionVideoHistoryPanel());
-    for (const delay of [40, 120, 260, 520]) {
-      const timer = window.setTimeout(() => {
-        videoHistoryPositionTimers.delete(timer);
-        positionVideoHistoryPanel();
-        if (!videoHistoryPositionTimers.size) videoHistoryPositionScheduled = false;
-      }, delay);
-      videoHistoryPositionTimers.add(timer);
-    }
+    window.requestAnimationFrame(() => {
+      videoHistoryPositionScheduled = false;
+      positionVideoHistoryPanel();
+    });
+  }
+
+  function observeVideoHistoryLayout(container, shell) {
+    if (typeof ResizeObserver !== "function") return;
+    if (videoHistoryObservedContainer === container && videoHistoryObservedShell === shell) return;
+    videoHistoryLayoutObserver?.disconnect();
+    videoHistoryLayoutObserver ||= new ResizeObserver(() => scheduleVideoHistoryPanelPositioning());
+    videoHistoryLayoutObserver.observe(container);
+    if (shell !== container) videoHistoryLayoutObserver.observe(shell);
+    videoHistoryObservedContainer = container;
+    videoHistoryObservedShell = shell;
   }
 
   function findVideoHistoryPanelShell(container, tabRect) {
@@ -1658,6 +1804,13 @@
   }
 
   function hydrateVideoHistoryCards(root) {
+    if (!videoHistoryMediaObserver && typeof IntersectionObserver === "function") {
+      videoHistoryMediaObserver = new IntersectionObserver(handleVideoHistoryMediaVisibility, {
+        root: root.closest(".pixmax-canvas-cloner-video-history-list"),
+        rootMargin: "160px 0px",
+        threshold: 0.01
+      });
+    }
     for (const video of root.querySelectorAll("video")) {
       if (!video.__pixmaxCanvasClonerVideoHistoryLazyBound) {
         video.__pixmaxCanvasClonerVideoHistoryLazyBound = true;
@@ -1666,24 +1819,82 @@
           if (event.key === " " || event.key === "Enter") loadVideoHistoryVideo(video);
         });
         video.addEventListener("play", () => {
+          suspendOtherVideoHistoryMedia(video);
           loadVideoHistoryVideo(video);
           markVideoHistoryItemWatchedFromElement(video);
         });
       }
+      if (videoHistoryMediaObserver) {
+        videoHistoryMediaObserver.observe(video);
+      } else {
+        loadVideoHistoryPoster(video);
+      }
     }
+  }
+
+  function handleVideoHistoryMediaVisibility(entries) {
+    for (const entry of entries) {
+      const video = entry.target;
+      if (entry.isIntersecting && videoHistoryOpen) {
+        loadVideoHistoryPoster(video);
+      } else {
+        releaseVideoHistoryVideo(video, true);
+      }
+    }
+  }
+
+  function loadVideoHistoryPoster(video) {
+    const poster = video?.dataset.poster || "";
+    if (poster && video.getAttribute("poster") !== poster) video.setAttribute("poster", poster);
   }
 
   function loadVideoHistoryVideo(video) {
     if (!video || video.src) return;
     const src = video.dataset.src || "";
     if (!src) return;
+    loadVideoHistoryPoster(video);
     video.src = src;
-    video.preload = "auto";
+    video.preload = "metadata";
     try {
       video.load();
     } catch {
       // Native controls can retry loading on the next user gesture.
     }
+  }
+
+  function suspendOtherVideoHistoryMedia(activeVideo) {
+    const panel = videoHistoryPanelElement;
+    if (!panel) return;
+    for (const video of panel.querySelectorAll("video")) {
+      if (video !== activeVideo) releaseVideoHistoryVideo(video, true);
+    }
+  }
+
+  function suspendVideoHistoryMedia(clearPosters = false) {
+    const panel = videoHistoryPanelElement;
+    if (!panel) return;
+    for (const video of panel.querySelectorAll("video")) {
+      releaseVideoHistoryVideo(video, true, clearPosters);
+    }
+  }
+
+  function releaseVideoHistoryVideo(video, releaseSource = true, clearPoster = false) {
+    if (!video) return;
+    try {
+      video.pause();
+    } catch {
+      // The element may have been detached while the history list rerendered.
+    }
+    if (releaseSource && video.getAttribute("src")) {
+      video.removeAttribute("src");
+      video.preload = "none";
+      try {
+        video.load();
+      } catch {
+        // Releasing the decoder is a best-effort optimization.
+      }
+    }
+    if (clearPoster) video.removeAttribute("poster");
   }
 
   function handleVideoHistoryPanelClick(event) {
@@ -4248,6 +4459,490 @@
     return actions;
   }
 
+  function isTextAreaPromptEditor(editor) {
+    return editor instanceof HTMLTextAreaElement;
+  }
+
+  function getPromptEditorValue(editor) {
+    return isTextAreaPromptEditor(editor) ? editor.value : (editor.textContent || "");
+  }
+
+  function dispatchPromptEditorInput(editor, inputType = "insertReplacementText") {
+    editor.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType,
+        data: null
+      })
+    );
+  }
+
+  function getPromptEditorTextNodes(editor) {
+    const nodes = [];
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      nodes.push(node);
+      node = walker.nextNode();
+    }
+    return nodes;
+  }
+
+  function getPromptEditorDomPoint(editor, offset) {
+    let remaining = Math.max(0, offset);
+    const nodes = getPromptEditorTextNodes(editor);
+    for (const node of nodes) {
+      const length = node.nodeValue?.length || 0;
+      if (remaining <= length) return { node, offset: remaining };
+      remaining -= length;
+    }
+    const last = nodes.at(-1);
+    if (last) return { node: last, offset: last.nodeValue?.length || 0 };
+    return { node: editor, offset: 0 };
+  }
+
+  function selectPromptEditorRange(editor, start, end, focusEditor = true) {
+    if (isTextAreaPromptEditor(editor)) {
+      editor.setSelectionRange(start, end);
+      if (focusEditor) editor.focus({ preventScroll: true });
+      return;
+    }
+
+    const selection = window.getSelection();
+    if (!selection) return;
+    const startPoint = getPromptEditorDomPoint(editor, start);
+    const endPoint = getPromptEditorDomPoint(editor, end);
+    const range = document.createRange();
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    if (focusEditor) editor.focus({ preventScroll: true });
+  }
+
+  function setPromptEditorValue(editor, value, selectionStart = value.length, selectionEnd = selectionStart) {
+    if (isTextAreaPromptEditor(editor)) {
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+      if (descriptor?.set) descriptor.set.call(editor, value);
+      else editor.value = value;
+      dispatchPromptEditorInput(editor);
+      selectPromptEditorRange(editor, selectionStart, selectionEnd);
+      return;
+    }
+
+    editor.focus({ preventScroll: true });
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    const replaced = document.execCommand?.("insertText", false, value);
+    if (!replaced) {
+      editor.textContent = value;
+      dispatchPromptEditorInput(editor);
+    }
+    selectPromptEditorRange(editor, selectionStart, selectionEnd);
+  }
+
+  function replacePromptEditorRange(editor, start, end, replacement) {
+    if (isTextAreaPromptEditor(editor)) {
+      const value = getPromptEditorValue(editor);
+      const nextValue = value.slice(0, start) + replacement + value.slice(end);
+      setPromptEditorValue(editor, nextValue, start, start + replacement.length);
+      return;
+    }
+
+    selectPromptEditorRange(editor, start, end);
+    const replaced = document.execCommand?.("insertText", false, replacement);
+    if (!replaced) {
+      const value = getPromptEditorValue(editor);
+      setPromptEditorValue(
+        editor,
+        value.slice(0, start) + replacement + value.slice(end),
+        start,
+        start + replacement.length
+      );
+    }
+  }
+
+  function isProtectedPromptRichElement(element) {
+    return Boolean(
+      element.matches?.("img, video, audio, [contenteditable='false'], [data-mention], [data-type*='mention']") ||
+      element.querySelector?.("img, video, audio, [contenteditable='false'], [data-mention], [data-type*='mention']")
+    );
+  }
+
+  function isBlankPromptLineElement(element) {
+    if (!(element instanceof HTMLElement) || isProtectedPromptRichElement(element)) return false;
+    const text = (element.innerText || element.textContent || "")
+      .replace(/[\u00a0\u200b\ufeff]/g, "")
+      .trim();
+    if (text) return false;
+    return /^(P|DIV|LI)$/i.test(element.tagName);
+  }
+
+  function removeEmptyLinesFromRichPromptEditor(editor) {
+    let removedCount = 0;
+    let changed = false;
+    const lineCandidates = [...editor.querySelectorAll("p, div, li")].filter(
+      (element) => !element.querySelector("p, div, li")
+    );
+
+    for (const line of [...lineCandidates].reverse()) {
+      if (!line.isConnected || !isBlankPromptLineElement(line)) continue;
+      line.remove();
+      removedCount += 1;
+      changed = true;
+    }
+
+    let previousBreak = null;
+    for (const breakElement of [...editor.querySelectorAll("br")]) {
+      if (!breakElement.isConnected) continue;
+      if (!previousBreak?.isConnected) {
+        previousBreak = breakElement;
+        continue;
+      }
+
+      const betweenRange = document.createRange();
+      betweenRange.setStartAfter(previousBreak);
+      betweenRange.setEndBefore(breakElement);
+      const betweenFragment = betweenRange.cloneContents();
+      const betweenText = (betweenFragment.textContent || "")
+        .replace(/[\u00a0\u200b\ufeff]/g, "")
+        .trim();
+      const containsProtectedReference = Boolean(
+        betweenFragment.querySelector?.(
+          "img, video, audio, [contenteditable='false'], [data-mention], [data-type*='mention']"
+        )
+      );
+      if (betweenText || containsProtectedReference) {
+        previousBreak = breakElement;
+        continue;
+      }
+
+      breakElement.remove();
+      removedCount += 1;
+      changed = true;
+    }
+
+    for (const textNode of getPromptEditorTextNodes(editor)) {
+      if (!textNode.nodeValue?.includes("\n")) continue;
+      if (textNode.parentElement?.closest("[contenteditable='false'], [data-mention], [data-type*='mention']")) {
+        continue;
+      }
+      let nodeRemovedCount = 0;
+      const nextValue = textNode.nodeValue.replace(
+        /\r?\n[\t \u00a0\u200b\ufeff]*(?=\r?\n)/g,
+        () => {
+          nodeRemovedCount += 1;
+          return "";
+        }
+      );
+      if (!nodeRemovedCount) continue;
+      textNode.nodeValue = nextValue;
+      removedCount += nodeRemovedCount;
+      changed = true;
+    }
+
+    if (changed) dispatchPromptEditorInput(editor, "deleteContentBackward");
+    return removedCount;
+  }
+
+  function getPromptMatches(text, query) {
+    const needle = query.toLocaleLowerCase();
+    if (!needle) return [];
+    const haystack = text.toLocaleLowerCase();
+    const matches = [];
+    let position = 0;
+    while (position <= haystack.length - needle.length) {
+      const index = haystack.indexOf(needle, position);
+      if (index < 0) break;
+      matches.push({ start: index, end: index + query.length });
+      position = index + Math.max(query.length, 1);
+    }
+    return matches;
+  }
+
+  function createPromptTools(editor) {
+    const tools = document.createElement("div");
+    tools.className = PROMPT_TOOLS_CLASS;
+    tools.dataset.open = "false";
+    tools.innerHTML = `
+      <button type="button" class="pixmax-prompt-tools-toggle" data-prompt-action="toggle" title="打开提示词查找与整理工具">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"></circle><path d="m12.5 12.5 4 4"></path></svg>
+        <span>查找</span>
+      </button>
+      <div class="pixmax-prompt-tools-panel">
+        <input type="search" class="pixmax-prompt-search-input" placeholder="搜索提示词" aria-label="搜索提示词文字">
+        <button type="button" data-prompt-action="search" title="开始搜索">搜索</button>
+        <span class="pixmax-prompt-match-count" aria-live="polite">待搜索</span>
+        <button type="button" data-prompt-action="previous" title="上一个匹配">↑</button>
+        <button type="button" data-prompt-action="next" title="下一个匹配">↓</button>
+        <input type="text" class="pixmax-prompt-replace-input" placeholder="替换为…" aria-label="替换文字">
+        <button type="button" data-prompt-action="replace" title="替换当前高亮匹配">替换</button>
+        <button type="button" data-prompt-action="replace-all" title="替换所有匹配">全部替换</button>
+        <button type="button" class="pixmax-prompt-remove-empty-lines" data-prompt-action="remove-empty-lines" title="删除只含空格的行">删除空行</button>
+      </div>
+    `;
+
+    const searchInput = tools.querySelector(".pixmax-prompt-search-input");
+    const replaceInput = tools.querySelector(".pixmax-prompt-replace-input");
+    const count = tools.querySelector(".pixmax-prompt-match-count");
+    let currentIndex = -1;
+    let activeQuery = "";
+
+    const setResultButtonsDisabled = (disabled) => {
+      for (const button of tools.querySelectorAll('[data-prompt-action="previous"], [data-prompt-action="next"]')) {
+        button.disabled = disabled;
+      }
+    };
+
+    const syncQueryActionButtons = () => {
+      const disabled = !searchInput.value;
+      for (const button of tools.querySelectorAll('[data-prompt-action="search"], [data-prompt-action="replace"], [data-prompt-action="replace-all"]')) {
+        button.disabled = disabled;
+      }
+    };
+
+    const refresh = (direction = 0, selectMatch = true, focusEditor = true) => {
+      const editorValue = getPromptEditorValue(editor);
+      const matches = getPromptMatches(editorValue, activeQuery);
+      if (!matches.length) {
+        currentIndex = -1;
+        count.textContent = "0/0";
+        setResultButtonsDisabled(true);
+        return matches;
+      }
+
+      if (direction) currentIndex = (currentIndex + direction + matches.length) % matches.length;
+      else {
+        if (isTextAreaPromptEditor(editor)) {
+          const selectionStart = editor.selectionStart;
+          const containingIndex = matches.findIndex(
+            (match) => selectionStart >= match.start && selectionStart <= match.end
+          );
+          currentIndex = containingIndex >= 0 ? containingIndex : 0;
+        } else {
+          currentIndex = Math.min(Math.max(currentIndex, 0), matches.length - 1);
+        }
+      }
+      count.textContent = `${currentIndex + 1}/${matches.length}`;
+      setResultButtonsDisabled(false);
+      if (selectMatch) {
+        const match = matches[currentIndex];
+        selectPromptEditorRange(editor, match.start, match.end, focusEditor);
+      }
+      return matches;
+    };
+
+    const startSearch = (direction = 1, focusEditor = true) => {
+      activeQuery = searchInput.value;
+      currentIndex = direction < 0 ? 0 : -1;
+      if (!activeQuery) {
+        count.textContent = "待搜索";
+        setResultButtonsDisabled(true);
+        syncQueryActionButtons();
+        searchInput.focus({ preventScroll: true });
+        return [];
+      }
+      return refresh(direction, true, focusEditor);
+    };
+
+    const ensureCurrentSearch = () => {
+      if (activeQuery === searchInput.value && activeQuery) return refresh(0, false);
+      return startSearch(1, false);
+    };
+
+    const replaceCurrent = () => {
+      const matches = ensureCurrentSearch();
+      if (!matches.length) return;
+      const match = matches[currentIndex];
+      const replacement = replaceInput.value;
+      replacePromptEditorRange(editor, match.start, match.end, replacement);
+      refresh(0);
+    };
+
+    const replaceAll = () => {
+      activeQuery = searchInput.value;
+      const editorValue = getPromptEditorValue(editor);
+      const matches = getPromptMatches(editorValue, activeQuery);
+      if (!matches.length) return;
+      const replacement = replaceInput.value;
+      if (isTextAreaPromptEditor(editor)) {
+        let nextValue = "";
+        let lastEnd = 0;
+        for (const match of matches) {
+          nextValue += editorValue.slice(lastEnd, match.start) + replacement;
+          lastEnd = match.end;
+        }
+        nextValue += editorValue.slice(lastEnd);
+        setPromptEditorValue(editor, nextValue);
+      } else {
+        for (const match of [...matches].reverse()) {
+          replacePromptEditorRange(editor, match.start, match.end, replacement);
+        }
+      }
+      refresh(0, false);
+      showToast(`已替换 ${matches.length} 处文字。`);
+    };
+
+    const removeEmptyLines = () => {
+      try {
+        let removedCount = 0;
+        if (isTextAreaPromptEditor(editor)) {
+          const lines = editor.value.split(/\r?\n/);
+          const keptLines = lines.filter((line) => line.trim() !== "");
+          removedCount = lines.length - keptLines.length;
+          if (removedCount) setPromptEditorValue(editor, keptLines.join("\n"));
+        } else {
+          removedCount = removeEmptyLinesFromRichPromptEditor(editor);
+        }
+        if (!removedCount) {
+          showToast("提示词里没有检测到可删除的空行。");
+          return;
+        }
+        refresh(0, false);
+        showToast(`已删除 ${removedCount} 个空行，引用内容保持不变。`);
+      } catch (error) {
+        showToast(`删除空行失败：${error.message || "编辑器结构无法识别"}`, true);
+      }
+    };
+
+    searchInput.addEventListener("input", () => {
+      activeQuery = "";
+      currentIndex = -1;
+      count.textContent = searchInput.value ? "待搜索" : "—";
+      setResultButtonsDisabled(true);
+      syncQueryActionButtons();
+    });
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      startSearch(event.shiftKey ? -1 : 1);
+    });
+    replaceInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      if (event.metaKey || event.ctrlKey) replaceAll();
+      else replaceCurrent();
+    });
+    tools.addEventListener("pointerdown", (event) => event.stopPropagation());
+    tools.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-prompt-action]");
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const action = button.dataset.promptAction;
+      if (action === "toggle") {
+        const willOpen = tools.dataset.open !== "true";
+        tools.dataset.open = String(willOpen);
+        button.querySelector("span").textContent = willOpen ? "收起" : "查找";
+        if (willOpen) searchInput.focus({ preventScroll: true });
+        return;
+      }
+      if (action === "search") startSearch(1);
+      if (action === "previous") refresh(-1);
+      if (action === "next") refresh(1);
+      if (action === "replace") replaceCurrent();
+      if (action === "replace-all") replaceAll();
+      if (action === "remove-empty-lines") removeEmptyLines();
+    });
+    tools.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key !== "Escape") return;
+      tools.dataset.open = "false";
+      tools.querySelector(".pixmax-prompt-tools-toggle span").textContent = "查找";
+      tools.querySelector(".pixmax-prompt-tools-toggle").focus({ preventScroll: true });
+    });
+    tools.addEventListener("keyup", (event) => event.stopPropagation());
+    editor.addEventListener("input", () => {
+      if (activeQuery) refresh(0, false);
+    });
+    setResultButtonsDisabled(true);
+    syncQueryActionButtons();
+    return tools;
+  }
+
+  function findPromptToolsTabAnchor(node) {
+    const matchingElements = [...node.querySelectorAll("button, [role='tab'], [role='button'], div, span")]
+      .filter((element) => element.textContent?.trim() === "首尾帧");
+    if (!matchingElements.length) return null;
+
+    let anchor = matchingElements.find(
+      (element) => element.matches("button, [role='tab'], [role='button']")
+    ) || matchingElements.at(-1);
+    while (
+      anchor.parentElement &&
+      anchor.parentElement !== node &&
+      anchor.parentElement.textContent?.trim() === "首尾帧"
+    ) {
+      anchor = anchor.parentElement;
+    }
+    return anchor;
+  }
+
+  function isPromptEditor(editor) {
+    const isContentEditable = editor instanceof HTMLElement && editor.isContentEditable;
+    const label = [
+      editor.getAttribute?.("aria-label"),
+      editor.getAttribute?.("data-placeholder"),
+      editor.getAttribute?.("placeholder"),
+      editor.className
+    ]
+      .filter((value) => typeof value === "string")
+      .join(" ");
+    const rect = editor.getBoundingClientRect?.() || { height: 0 };
+    return (
+      (isTextAreaPromptEditor(editor) || isContentEditable) &&
+      Boolean(editor.closest(NODE_SELECTOR)) &&
+      !editor.closest(`.${PROMPT_TOOLS_CLASS}, #${VIDEO_HISTORY_PANEL_ID}`) &&
+      (
+        isTextAreaPromptEditor(editor) ||
+        editor.getAttribute("aria-multiline") === "true" ||
+        /prosemirror|prompt|提示|描述|输入/i.test(label) ||
+        rect.height >= 60
+      )
+    );
+  }
+
+  function syncPromptTools() {
+    promptToolsSyncScheduled = false;
+    const candidates = new Set();
+    const roots = [...pendingPromptToolRoots];
+    pendingPromptToolRoots.clear();
+    for (const root of roots) {
+      if (root?.matches?.('textarea, [contenteditable="true"], [contenteditable="plaintext-only"]')) {
+        candidates.add(root);
+      }
+      for (const editor of root?.querySelectorAll?.('textarea, [contenteditable="true"], [contenteditable="plaintext-only"]') ?? []) {
+        candidates.add(editor);
+      }
+      const containingNode = root?.closest?.(NODE_SELECTOR);
+      for (const editor of containingNode?.querySelectorAll?.('textarea, [contenteditable="true"], [contenteditable="plaintext-only"]') ?? []) {
+        candidates.add(editor);
+      }
+    }
+    for (const editor of candidates) {
+      if (!isPromptEditor(editor) || editor.dataset.pixmaxPromptToolsMounted === "true") continue;
+      const host = editor.closest(NODE_SELECTOR);
+      if (!host) continue;
+      const tabAnchor = findPromptToolsTabAnchor(host);
+      if (!tabAnchor) continue;
+      editor.dataset.pixmaxPromptToolsMounted = "true";
+      editor.classList.add(PROMPT_EDITOR_CLASS);
+      host.classList.add(PROMPT_TOOLS_HOST_CLASS);
+      tabAnchor.insertAdjacentElement("afterend", createPromptTools(editor));
+    }
+  }
+
+  function schedulePromptToolsSync(root = document.body) {
+    if (root) pendingPromptToolRoots.add(root);
+    if (promptToolsSyncScheduled) return;
+    promptToolsSyncScheduled = true;
+    window.requestAnimationFrame(syncPromptTools);
+  }
+
   function hasNativeDownloadAction(toolbar) {
     return [...toolbar.querySelectorAll("button")].some(
       (button) =>
@@ -4455,6 +5150,7 @@
       }
     });
     scheduleToolbarSync(document.body);
+    schedulePromptToolsSync(document.body);
     refreshWatchedVideoState();
     document.addEventListener("play", handleVideoPlay, true);
     document.addEventListener("loadedmetadata", handleVideoMetadata, true);
@@ -4488,7 +5184,6 @@
       scheduleLegacyCleanup();
       ensureTopActionButtons();
       scheduleVideoHistoryEntrySync();
-      if (videoHistoryOpen) scheduleVideoHistoryPanelPositioning();
       autoResolveCollaborationConflict();
       scheduleOfficialPresenceAppearance();
       neutralizeOfficialFocusColors();
@@ -4539,8 +5234,10 @@
       }
       for (const mutation of mutations) {
         scheduleToolbarSync(mutation.target);
+        schedulePromptToolsSync(mutation.target);
         for (const node of mutation.addedNodes) {
           scheduleToolbarSync(node);
+          schedulePromptToolsSync(node);
         }
       }
     }).observe(document.body, {
