@@ -3,7 +3,21 @@
 const MESSAGE = {
   EAGLE_IMPORT_URL: "pixmax-cloner:eagle-import-url",
   EAGLE_LIST_FOLDERS: "pixmax-cloner:eagle-list-folders",
-  OPEN_REVIEW_BOARD: "pixmax-cloner:open-review-board"
+  OPEN_REVIEW_BOARD: "pixmax-cloner:open-review-board",
+  GET_EXTERNAL_LIKE_STATE: "pixmax-cloner:get-external-like-state",
+  TOGGLE_EXTERNAL_LIKE: "pixmax-cloner:toggle-external-like"
+};
+
+const LIKES_STORAGE_KEY = "pixmaxLikedItems";
+const PIXMAX_API_ORIGIN = "https://app.pixmax.cn";
+const SHARED_LIKES_MARKER = "PIXMAX_CANVAS_CLONER_LIKES_V1";
+const CANVAS_REVISION_CONFLICT = "Canvas.Revision.Conflict";
+const DEFAULT_LIKE_COLOR = "#ff3864";
+const SHARED_LIKE_OPTIONS_DEFAULTS = {
+  sharedLikesEnabled: true,
+  sharedLikesFileUuid: "",
+  sharedLikesOwnerName: "",
+  sharedLikesColor: DEFAULT_LIKE_COLOR
 };
 
 const DEFAULT_OPTIONS = {
@@ -33,6 +47,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     openReviewBoard()
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: friendlyError(error) }));
+    return true;
+  }
+
+  if (message.type === MESSAGE.GET_EXTERNAL_LIKE_STATE) {
+    getExternalLikeState(message.keys)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: friendlyExternalError(error) }));
+    return true;
+  }
+
+  if (message.type === MESSAGE.TOGGLE_EXTERNAL_LIKE) {
+    toggleExternalLike(message.item)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: friendlyExternalError(error) }));
     return true;
   }
 
@@ -82,11 +110,14 @@ async function importUrlToEagle(item) {
   const website = /^https?:\/\//i.test(item?.website || "")
     ? item.website
     : "https://app.pixmax.cn/";
+  const referer = /^https:\/\/jimeng\.jianying\.com\//i.test(website)
+    ? "https://jimeng.jianying.com/"
+    : "https://app.pixmax.cn/";
   const result = await eagleFetch(options.eagleApiUrl, "/api/item/addFromURL", {
     annotation: String(item?.annotation || "").trim(),
     folderId: options.eagleFolderId,
     headers: {
-      referer: "https://app.pixmax.cn/"
+      referer
     },
     name,
     url,
@@ -229,6 +260,312 @@ function getStoredOptions() {
 function friendlyError(error) {
   if (/Failed to fetch|NetworkError|fetch/i.test(error?.message || "")) {
     return "无法连接 Eagle。请先打开 Eagle App。";
+  }
+  return error?.message || String(error);
+}
+
+async function getExternalLikeState(rawKeys) {
+  const keys = new Set((Array.isArray(rawKeys) ? rawKeys : []).map(String).filter(Boolean));
+  const options = await getStoredSharedLikeOptions();
+  validateJimengCanvasOptions(options);
+  const canvas = await fetchPixmaxCanvas(options.sharedLikesFileUuid);
+  const items = getSharedOwnerItems(canvas, options.sharedLikesOwnerName);
+
+  return {
+    color: normalizeLikeColor(options.sharedLikesColor),
+    likedKeys: items.map(getLikeKey).filter((key) => key && (!keys.size || keys.has(key))),
+    shared: true,
+    storageTarget: "pixmax-canvas"
+  };
+}
+
+async function toggleExternalLike(rawItem) {
+  const item = normalizeExternalLikeItem(rawItem);
+  const options = await getStoredSharedLikeOptions();
+  validateJimengCanvasOptions(options);
+  return toggleSharedExternalLike(item, options);
+}
+
+async function toggleSharedExternalLike(item, options, retryCount = 1) {
+  const canvas = await fetchPixmaxCanvas(options.sharedLikesFileUuid);
+  const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], options.sharedLikesOwnerName);
+  if (!ownerNode) {
+    throw new Error(`共享画布里找不到名字为「${options.sharedLikesOwnerName}」的文字节点。`);
+  }
+
+  const parsed = parseSharedLikeText(getRawNodeText(ownerNode));
+  const color = normalizeLikeColor(options.sharedLikesColor || parsed?.color);
+  const items = parsed?.items ? [...parsed.items] : [];
+  const targetKey = getLikeKey(item);
+  const existingIndex = items.findIndex((candidate) => getLikeKey(candidate) === targetKey);
+  let liked;
+  if (existingIndex >= 0) {
+    items.splice(existingIndex, 1);
+    liked = false;
+  } else {
+    items.unshift({
+      ...item,
+      likedAt: new Date().toISOString(),
+      likedBy: options.sharedLikesOwnerName,
+      likedByColor: color
+    });
+    liked = true;
+  }
+
+  const result = await pixmaxApiPost("/canvas/node/batch", {
+    fileUuid: options.sharedLikesFileUuid,
+    baseRevision: canvas.revision,
+    create: [],
+    update: [
+      {
+        uuid: ownerNode.uuid,
+        metaData: ownerNode.metaData || "{}",
+        nodeText: buildSharedLikeText(
+          options.sharedLikesOwnerName,
+          items,
+          color,
+          parsed?.settings || {}
+        )
+      }
+    ],
+    delete: []
+  });
+
+  if (!result.success) {
+    if (result.errCode === CANVAS_REVISION_CONFLICT && retryCount > 0) {
+      return toggleSharedExternalLike(item, options, retryCount - 1);
+    }
+    throw new Error(result.errMessage || result.errCode || "共享收藏写入失败。");
+  }
+
+  return { color, liked, shared: true, storageTarget: "pixmax-canvas" };
+}
+
+async function fetchPixmaxCanvas(fileUuid) {
+  const result = await pixmaxApiPost("/canvas/get", { fileUuid });
+  if (!result.success) {
+    throw new Error(result.errMessage || result.errCode || "无法读取 Pixmax Review Board 数据库。");
+  }
+  return result.data;
+}
+
+async function pixmaxApiPost(path, body) {
+  const response = await fetch(`${PIXMAX_API_ORIGIN}/user/api${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error(`Pixmax API 返回了无法解析的响应（HTTP ${response.status}）。`);
+  }
+  if (!response.ok) {
+    throw new Error(result.errMessage || result.errCode || `Pixmax API 请求失败：HTTP ${response.status}`);
+  }
+  return result;
+}
+
+function getSharedOwnerItems(canvas, ownerName) {
+  const node = findSharedLikesOwnerNode(canvas.nodes ?? [], ownerName);
+  return node ? parseSharedLikeText(getRawNodeText(node))?.items || [] : [];
+}
+
+function findSharedLikesOwnerNode(nodes, ownerName) {
+  const textNodes = (nodes || []).filter((node) => typeof node?.nodeText === "string");
+  const marked = textNodes.find((node) => parseSharedLikeText(getRawNodeText(node))?.ownerName === ownerName);
+  if (marked) return marked;
+
+  const byLabel = textNodes.find((node) => getRawNodeLabel(node) === ownerName);
+  if (byLabel) return byLabel;
+
+  return textNodes.find((node) => {
+    const text = getRawNodeText(node).trim();
+    return text === ownerName || text.split(/\r?\n/, 1)[0]?.trim() === ownerName;
+  });
+}
+
+function parseSharedLikeText(value) {
+  const text = String(value || "");
+  const markerIndex = text.indexOf(SHARED_LIKES_MARKER);
+  if (markerIndex < 0) return null;
+  const jsonStart = text.indexOf("{", markerIndex + SHARED_LIKES_MARKER.length);
+  if (jsonStart < 0) return null;
+  try {
+    const data = JSON.parse(text.slice(jsonStart).trim());
+    if (!data || data.version !== 1 || !Array.isArray(data.items)) return null;
+    return {
+      color: normalizeLikeColor(data.color),
+      ownerName: String(data.ownerName || "").trim(),
+      settings: data.settings && typeof data.settings === "object" ? data.settings : {},
+      items: data.items.filter((item) => item && typeof item === "object")
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildSharedLikeText(ownerName, items, color, settings = {}) {
+  return [
+    ownerName,
+    SHARED_LIKES_MARKER,
+    JSON.stringify(
+      {
+        version: 1,
+        ownerName,
+        color: normalizeLikeColor(color),
+        settings,
+        updatedAt: new Date().toISOString(),
+        items
+      },
+      null,
+      2
+    )
+  ].join("\n");
+}
+
+function getRawNodeText(node) {
+  return typeof node?.nodeText === "string" ? node.nodeText : "";
+}
+
+function getRawNodeLabel(node) {
+  try {
+    const metaData = JSON.parse(node?.metaData || "{}");
+    return String(metaData.data?.label || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeExternalLikeItem(rawItem) {
+  if (!rawItem || typeof rawItem !== "object") throw new Error("没有读取到即梦视频信息。");
+  const url = normalizeAssetUrl(rawItem.url);
+  const likeKey = String(rawItem.likeKey || "").trim().slice(0, 1200);
+  if (!url || !likeKey || !likeKey.startsWith("jimeng:")) {
+    throw new Error("即梦视频缺少稳定的公开链接。");
+  }
+  const referenceImages = (Array.isArray(rawItem.referenceImages) ? rawItem.referenceImages : [])
+    .map((image, index) => ({
+      name: String(image?.name || `参考图 ${index + 1}`).trim().slice(0, 120),
+      url: normalizeAssetUrl(image?.url)
+    }))
+    .filter((image) => image.url)
+    .slice(0, 20);
+  const promptContent = (Array.isArray(rawItem.promptContent) ? rawItem.promptContent : [])
+    .map((segment) => {
+      if (segment?.type === "text") {
+        const text = String(segment.text || "").slice(0, 12000);
+        return text ? { type: "text", text } : null;
+      }
+      if (segment?.type === "image") {
+        const referenceIndex = Number(segment.referenceIndex);
+        if (!Number.isInteger(referenceIndex) || referenceIndex < 0 || referenceIndex >= referenceImages.length) {
+          return null;
+        }
+        return {
+          type: "image",
+          referenceIndex,
+          name: String(segment.name || referenceImages[referenceIndex].name).trim().slice(0, 120)
+        };
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .slice(0, 200);
+  return {
+    annotation: String(rawItem.annotation || "").trim().slice(0, 12000),
+    duration: normalizePositiveNumber(rawItem.duration),
+    likeKey,
+    linkMayExpire: Boolean(rawItem.linkMayExpire),
+    mediaType: "video",
+    name: String(rawItem.name || "即梦视频").trim().slice(0, 300),
+    poster: normalizeAssetUrl(rawItem.poster),
+    promptContent,
+    referenceImages,
+    source: "jimeng",
+    sourceUrlIssuedAt: String(rawItem.sourceUrlIssuedAt || "").trim().slice(0, 80),
+    sourceWorkspace: String(rawItem.sourceWorkspace || "").trim().slice(0, 120),
+    url,
+    videoHeight: normalizePositiveNumber(rawItem.videoHeight),
+    videoWidth: normalizePositiveNumber(rawItem.videoWidth),
+    website: normalizeAssetUrl(rawItem.website) || "https://jimeng.jianying.com/"
+  };
+}
+
+function getLikeKey(item) {
+  if (item?.source === "jimeng" || String(item?.likeKey || "").startsWith("jimeng:")) {
+    return normalizeJimengLikeKey(item?.likeKey || item?.url);
+  }
+  return item?.likeKey || item?.nodeId || item?.url || "";
+}
+
+function normalizeJimengLikeKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let payload = raw.startsWith("jimeng:") ? raw.slice("jimeng:".length) : raw;
+  try {
+    if (/^https?:\/\//i.test(payload)) payload = new URL(payload).pathname;
+  } catch {
+    // Fall through to path parsing for malformed legacy values.
+  }
+  const path = payload.split(/[?#]/, 1)[0].replace(/\/+$/, "");
+  const resourceId = path.split("/").filter(Boolean).pop() || "";
+  return resourceId ? `jimeng:${resourceId}` : "";
+}
+
+function normalizePositiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number * 1000) / 1000 : 0;
+}
+
+function normalizeLikeColor(value) {
+  const color = String(value || "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : DEFAULT_LIKE_COLOR;
+}
+
+function validateSharedLikeOptions(options) {
+  if (!options.sharedLikesFileUuid) throw new Error("请先在扩展设置里配置共享 Likes 数据库链接。");
+  if (!options.sharedLikesOwnerName) throw new Error("请先在扩展设置里填写你的共享 Likes 名字。");
+}
+
+function validateJimengCanvasOptions(options) {
+  if (!options.sharedLikesEnabled) {
+    throw new Error("即梦爱心需要写入 Pixmax 画布：请先在扩展设置中开启「共享 Likes」。");
+  }
+  try {
+    validateSharedLikeOptions(options);
+  } catch {
+    throw new Error("即梦爱心需要写入 Pixmax 画布：请先在扩展设置中配置共享 Likes 数据库链接和你的名字。");
+  }
+}
+
+function getStoredSharedLikeOptions() {
+  return new Promise((resolve) => chrome.storage.sync.get(SHARED_LIKE_OPTIONS_DEFAULTS, resolve));
+}
+
+function getLocalLikedItems() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get({ [LIKES_STORAGE_KEY]: [] }, (result) => {
+      resolve(Array.isArray(result[LIKES_STORAGE_KEY]) ? result[LIKES_STORAGE_KEY] : []);
+    });
+  });
+}
+
+function setLocalLikedItems(items) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set({ [LIKES_STORAGE_KEY]: items }, () => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) reject(new Error(runtimeError.message));
+      else resolve();
+    });
+  });
+}
+
+function friendlyExternalError(error) {
+  if (/Failed to fetch|NetworkError|fetch/i.test(error?.message || "")) {
+    return "无法连接 Pixmax Review Board，请确认 Pixmax 已登录后重试。";
   }
   return error?.message || String(error);
 }

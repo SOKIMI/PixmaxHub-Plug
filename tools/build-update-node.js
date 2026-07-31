@@ -11,6 +11,7 @@ const FILES = [
   "manifest.json",
   "bridge.js",
   "content.js",
+  "jimeng.js",
   "relay.js",
   "background.js",
   "popup.html",
