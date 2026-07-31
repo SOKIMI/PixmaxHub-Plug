@@ -4137,7 +4137,7 @@
   }
 
   function getLikeKey(item) {
-    return item?.nodeId || item?.url || "";
+    return item?.likeKey || item?.nodeId || item?.url || "";
   }
 
   function getToolbarNodeId(toolbar) {

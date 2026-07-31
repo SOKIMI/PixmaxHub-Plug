@@ -308,6 +308,12 @@ function matchesSearch(item) {
     item.eagleCode,
     item.nodeId,
     getItemDownloadCode(item),
+    ...(Array.isArray(item.referenceImages)
+      ? item.referenceImages.flatMap((image) => [image?.name, image?.url])
+      : []),
+    ...(Array.isArray(item.promptContent)
+      ? item.promptContent.flatMap((segment) => [segment?.text, segment?.name])
+      : []),
     ...(Array.isArray(item.reviewTags) ? item.reviewTags : []),
     ...(Array.isArray(item.socialComments) ? item.socialComments.map((comment) => comment.text) : [])
   ]
@@ -512,6 +518,8 @@ function renderItem(item) {
   const eagle = card.querySelector(".eagle");
   const title = card.querySelector("h2");
   const prompt = card.querySelector(".prompt");
+  const referenceMedia = card.querySelector(".reference-media");
+  const referenceImages = card.querySelector(".reference-images");
   const meta = card.querySelector(".meta");
   const open = card.querySelector(".open");
   const copy = card.querySelector(".copy");
@@ -519,7 +527,7 @@ function renderItem(item) {
 
   const mediaUrl = normalizeUrl(item.url);
   const pageUrl = normalizeUrl(item.website) || mediaUrl;
-  const isVideo = isVideoUrl(mediaUrl);
+  const isVideo = isVideoItem(item);
   const isAudio = isAudioUrl(mediaUrl);
   const isExpandableMedia = Boolean(mediaUrl && !isAudio);
   const likeColor = normalizeColor(item.likedByColor);
@@ -569,12 +577,15 @@ function renderItem(item) {
   }
   preview.append(createPreview(item, () => renderResolutionBadge(item, resolutionBadge)));
   renderResolutionBadge(item, resolutionBadge);
-  title.textContent = item.name || filenameFromUrl(mediaUrl) || "Pixmax result";
-  prompt.textContent = item.annotation || "No prompt captured.";
-  prompt.title = item.annotation || "";
-  meta.textContent = downloadCode
+  title.textContent = item.name || filenameFromUrl(mediaUrl) || (item.source === "jimeng" ? "即梦视频" : "Pixmax result");
+  renderPromptContent(item, prompt);
+  renderReferenceImages(item, referenceMedia, referenceImages);
+  const savedMeta = downloadCode
     ? `${formatLikedAt(item.likedAt, item.likedBy)} · ${downloadCode}`
     : formatLikedAt(item.likedAt, item.likedBy);
+  meta.textContent = item.source === "jimeng"
+    ? `${savedMeta} · 即梦${item.linkMayExpire ? " · 源链接可能过期" : ""}`
+    : savedMeta;
   if (downloadCode) meta.title = `Eagle 下载编码：${downloadCode}`;
   open.href = buildFocusUrl(pageUrl, item.nodeId, item) || mediaUrl || "#";
   renderReviewPanel(item, card, ribbon);
@@ -619,6 +630,72 @@ function renderItem(item) {
 
   renderSocial(item, card);
   return card;
+}
+
+function renderReferenceImages(item, section, container) {
+  if (!section || !container) return;
+  container.textContent = "";
+  const images = (Array.isArray(item?.referenceImages) ? item.referenceImages : [])
+    .map((image, index) => ({
+      name: String(image?.name || `参考图 ${index + 1}`).trim(),
+      url: normalizeUrl(image?.url)
+    }))
+    .filter((image) => image.url);
+  section.hidden = !images.length;
+  for (const image of images) {
+    const link = document.createElement("a");
+    link.href = image.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.title = image.name;
+    const preview = document.createElement("img");
+    preview.src = image.url;
+    preview.alt = image.name;
+    preview.loading = "lazy";
+    link.append(preview);
+    container.append(link);
+  }
+}
+
+function renderPromptContent(item, container) {
+  container.textContent = "";
+  container.title = item.annotation || "";
+  const content = Array.isArray(item?.promptContent) ? item.promptContent : [];
+  const references = Array.isArray(item?.referenceImages) ? item.referenceImages : [];
+  let rendered = false;
+
+  for (const segment of content) {
+    if (segment?.type === "text" && segment.text) {
+      container.append(document.createTextNode(String(segment.text)));
+      rendered = true;
+      continue;
+    }
+    if (segment?.type !== "image") continue;
+    const referenceIndex = Number(segment.referenceIndex);
+    const reference = Number.isInteger(referenceIndex) ? references[referenceIndex] : null;
+    const url = normalizeUrl(reference?.url);
+    const name = String(segment.name || reference?.name || "参考图").trim();
+    if (!url) {
+      container.append(document.createTextNode(`@${name}`));
+      rendered = true;
+      continue;
+    }
+    const link = document.createElement("a");
+    link.className = "prompt-inline-reference";
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.title = `@${name}`;
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = `@${name}`;
+    image.loading = "lazy";
+    link.append(image);
+    container.append(link);
+    rendered = true;
+  }
+
+  if (!rendered) container.textContent = item.annotation || "No prompt captured.";
 }
 
 function renderReviewPanel(item, card, ribbon) {
@@ -907,7 +984,7 @@ function createPreview(item, onMetadata) {
   const url = normalizeUrl(item?.url);
   if (!url) return document.createTextNode("No preview");
 
-  if (isVideoUrl(url)) {
+  if (isVideoItem(item)) {
     const video = document.createElement("video");
     const poster = normalizeUrl(item.poster || item.thumbnailUrl || item.previewUrl);
     video.controls = true;
@@ -958,7 +1035,13 @@ function createPreview(item, onMetadata) {
 }
 
 function isVideoUrl(url) {
-  return /\.(mp4|webm|mov)(\?|#|$)/i.test(String(url || ""));
+  const value = String(url || "");
+  if (/\.(mp4|webm|mov)(\?|#|$)/i.test(value)) return true;
+  try {
+    return /(^|\.)vlabvod\.com$/i.test(new URL(value).hostname);
+  } catch {
+    return false;
+  }
 }
 
 function isVideoItem(item) {
@@ -1204,7 +1287,7 @@ function applyReviewVideoSoundPreference(video) {
 }
 
 function getLikeKey(item) {
-  return item?.nodeId || item?.url || "";
+  return item?.likeKey || item?.nodeId || item?.url || "";
 }
 
 function removeLike(item) {
@@ -1290,6 +1373,12 @@ function buildExportHtml(items) {
     .body { display: grid; gap: 9px; padding: 12px; }
     h2 { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
     .prompt { max-height: 190px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: #a9adb5; font-size: 12px; line-height: 1.5; }
+    .prompt-inline-reference { display: inline-flex; width: 28px; height: 28px; margin: 0 4px; overflow: hidden; border: 1px solid #4a5059; border-radius: 7px; vertical-align: middle; }
+    .prompt-inline-reference img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .references { display: grid; gap: 6px; color: #858b95; font-size: 11px; }
+    .references > div { display: flex; flex-wrap: wrap; gap: 7px; }
+    .references a { display: block; width: 58px; height: 58px; overflow: hidden; border: 1px solid #3c4148; border-radius: 7px; }
+    .references img { width: 100%; height: 100%; object-fit: cover; }
     .meta { color: #858b95; font-size: 12px; line-height: 1.5; }
     .open { color: #f3f4f6; font-size: 12px; }
   </style>
@@ -1310,9 +1399,9 @@ function renderExportCard(item) {
   const mediaUrl = normalizeUrl(item.url);
   const pageUrl = normalizeUrl(item.website);
   const title = item.name || filenameFromUrl(mediaUrl) || "Pixmax result";
-  const preview = renderExportPreview(mediaUrl);
-  const prompt = item.annotation || "No prompt captured.";
+  const preview = renderExportPreview(item);
   const meta = formatLikedAt(item.likedAt, item.likedBy);
+  const referenceImages = renderExportReferenceImages(item);
   const openLink = pageUrl
     ? `<a class="open" href="${escapeAttribute(buildFocusUrl(pageUrl, item.nodeId, item))}" target="_blank" rel="noreferrer">Open original</a>`
     : "";
@@ -1321,23 +1410,59 @@ function renderExportCard(item) {
       <a class="preview" href="${escapeAttribute(mediaUrl || pageUrl || "#")}" target="_blank" rel="noreferrer">${preview}</a>
       <div class="body">
         <h2 title="${escapeAttribute(title)}">${escapeHtml(title)}</h2>
-        <p class="prompt">${escapeHtml(prompt)}</p>
+        <p class="prompt">${renderExportPrompt(item)}</p>
+        ${referenceImages}
         <p class="meta">${escapeHtml(meta)}</p>
         ${openLink}
       </div>
     </article>`;
 }
 
-function renderExportPreview(url) {
+function renderExportPrompt(item) {
+  const content = Array.isArray(item?.promptContent) ? item.promptContent : [];
+  const references = Array.isArray(item?.referenceImages) ? item.referenceImages : [];
+  let rendered = "";
+  for (const segment of content) {
+    if (segment?.type === "text" && segment.text) {
+      rendered += escapeHtml(segment.text);
+      continue;
+    }
+    if (segment?.type !== "image") continue;
+    const referenceIndex = Number(segment.referenceIndex);
+    const reference = Number.isInteger(referenceIndex) ? references[referenceIndex] : null;
+    const url = normalizeUrl(reference?.url);
+    const name = String(segment.name || reference?.name || "参考图").trim();
+    rendered += url
+      ? `<a class="prompt-inline-reference" href="${escapeAttribute(url)}" target="_blank" rel="noreferrer" title="${escapeAttribute(`@${name}`)}"><img src="${escapeAttribute(url)}" alt="${escapeAttribute(`@${name}`)}"></a>`
+      : escapeHtml(`@${name}`);
+  }
+  return rendered || escapeHtml(item.annotation || "No prompt captured.");
+}
+
+function renderExportPreview(item) {
+  const url = normalizeUrl(item?.url);
   if (!url) return "No preview";
   const escapedUrl = escapeAttribute(url);
-  if (/\.(mp4|webm|mov)(\?|#|$)/i.test(url)) {
+  if (isVideoItem(item)) {
     return `<video src="${escapedUrl}" controls muted preload="metadata"></video>`;
   }
   if (/\.(mp3|wav|m4a|aac|ogg)(\?|#|$)/i.test(url)) {
     return `<audio src="${escapedUrl}" controls preload="metadata"></audio>`;
   }
   return `<img src="${escapedUrl}" alt="">`;
+}
+
+function renderExportReferenceImages(item) {
+  const images = (Array.isArray(item?.referenceImages) ? item.referenceImages : [])
+    .map((image, index) => ({
+      name: String(image?.name || `参考图 ${index + 1}`).trim(),
+      url: normalizeUrl(image?.url)
+    }))
+    .filter((image) => image.url);
+  if (!images.length) return "";
+  return `<div class="references"><strong>参考图片</strong><div>${images.map((image) =>
+    `<a href="${escapeAttribute(image.url)}" target="_blank" rel="noreferrer"><img src="${escapeAttribute(image.url)}" alt="${escapeAttribute(image.name)}"></a>`
+  ).join("")}</div></div>`;
 }
 
 function normalizeUrl(value) {

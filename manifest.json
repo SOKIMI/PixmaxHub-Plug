@@ -1,13 +1,17 @@
 {
   "manifest_version": 3,
   "name": "PixmaxHub Plug",
-  "version": "1.4.51",
-  "description": "Add Pixmax canvas helpers, Eagle import, and a shared team review board.",
+  "version": "1.5.6",
+  "description": "Add Pixmax and Jimeng collection helpers, Eagle import, and a shared team review board.",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
     "https://app.pixmax.cn/*",
+    "https://jimeng.jianying.com/*",
+    "https://*.vlabvod.com/*",
+    "https://*.vlabstatic.com/*",
+    "https://*.byteimg.com/*",
     "https://api.github.com/*",
     "https://codeload.github.com/*",
     "https://raw.githubusercontent.com/*",
@@ -35,6 +39,15 @@
       "js": [
         "relay.js",
         "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://jimeng.jianying.com/*"
+      ],
+      "js": [
+        "jimeng.js"
       ],
       "run_at": "document_idle"
     }
