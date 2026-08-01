@@ -8,7 +8,7 @@ Chrome extension that adds helper actions to Pixmax's selected-node toolbar:
 - Save to Eagle: send Pixmax's original asset URL to Eagle's local Web API.
 - Like: save generated Pixmax results locally, or sync them through a shared Pixmax text node.
 - Review Board: search shared Likes, filter by review status, mark results as Pick/Maybe/Reject, tag results, and keep team comments/likes in the shared canvas.
-- Jimeng actions: add Review Board and **存入 Eagle** buttons to every generated video card, and preserve referenced images at their original inline `@` positions in the prompt.
+- Jimeng actions: place Review Board and **存入 Eagle** side by side in every generated video's native action bar, and preserve referenced images at their original inline `@` positions in the prompt.
 
 ## Local Likes
 
@@ -26,11 +26,11 @@ Use **Export HTML** to download a standalone share page, or **Export JSON** to d
 
 ## Jimeng Video Likes
 
-Open an authenticated `https://jimeng.jianying.com/ai-tool/generate...` page after loading the extension. Each generated video card gets a heart in its upper-right corner. Jimeng heart records always use the configured Pixmax shared Likes canvas, including their `source: "jimeng"` marker, video link, prompt, and reference-image data.
+Open an authenticated `https://jimeng.jianying.com/ai-tool/generate...` page after loading the extension. Each generated video gets a Review Board heart beside **存入 Eagle** in Jimeng's native result action bar. Jimeng heart records always use the configured Pixmax shared Likes canvas, including their `source: "jimeng"` marker, video link, prompt, and reference-image data.
 
 Each card also gets a **存入 Eagle** button beside Jimeng's native result actions. It inherits the native action button's dimensions and visual styling and imports the current signed video URL into the Eagle target folder selected in the extension popup.
 
-Jimeng records include the generation prompt, model labels, video dimensions, source page, and referenced image URLs. New records save the prompt as ordered text/image segments, so the Review Board and exported HTML can restore each referenced image at its original inline `@` position. Jimeng CDN links can expire or be deleted by the source service; the Review Board marks these records accordingly and does not claim to archive the media permanently.
+Jimeng records include the generation prompt, model labels, video dimensions, source page, and referenced image URLs. New records save the prompt as ordered text/image segments, so the Review Board and exported HTML can restore each referenced image at its original inline `@` position. The extension keeps the complete signed Jimeng CDN URL and refreshes the saved URL when the same liked video appears on an authenticated Jimeng page. Jimeng CDN links can still expire or be deleted by the source service; the Review Board marks these records accordingly and does not claim to archive the media permanently.
 
 ## Eagle Import
 
