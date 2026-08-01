@@ -5,6 +5,7 @@ const MESSAGE = {
   EAGLE_LIST_FOLDERS: "pixmax-cloner:eagle-list-folders",
   OPEN_REVIEW_BOARD: "pixmax-cloner:open-review-board",
   GET_EXTERNAL_LIKE_STATE: "pixmax-cloner:get-external-like-state",
+  REFRESH_EXTERNAL_LIKED_ITEMS: "pixmax-cloner:refresh-external-liked-items",
   TOGGLE_EXTERNAL_LIKE: "pixmax-cloner:toggle-external-like"
 };
 
@@ -59,6 +60,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === MESSAGE.TOGGLE_EXTERNAL_LIKE) {
     toggleExternalLike(message.item)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: friendlyExternalError(error) }));
+    return true;
+  }
+
+  if (message.type === MESSAGE.REFRESH_EXTERNAL_LIKED_ITEMS) {
+    refreshExternalLikedItems(message.items)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: friendlyExternalError(error) }));
     return true;
@@ -286,6 +294,83 @@ async function toggleExternalLike(rawItem) {
   return toggleSharedExternalLike(item, options);
 }
 
+async function refreshExternalLikedItems(rawItems) {
+  const items = (Array.isArray(rawItems) ? rawItems : [])
+    .map(normalizeExternalLikeItem)
+    .slice(0, 100);
+  if (!items.length) return { updated: 0 };
+  const options = await getStoredSharedLikeOptions();
+  validateJimengCanvasOptions(options);
+  return refreshSharedExternalLikedItems(items, options);
+}
+
+async function refreshSharedExternalLikedItems(freshItems, options, retryCount = 1) {
+  const canvas = await fetchPixmaxCanvas(options.sharedLikesFileUuid);
+  const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], options.sharedLikesOwnerName);
+  if (!ownerNode) {
+    throw new Error(`共享画布里找不到名字为「${options.sharedLikesOwnerName}」的文字节点。`);
+  }
+
+  const parsed = parseSharedLikeText(getRawNodeText(ownerNode));
+  const color = normalizeLikeColor(options.sharedLikesColor || parsed?.color);
+  const items = parsed?.items ? [...parsed.items] : [];
+  let updated = 0;
+  for (const freshItem of freshItems) {
+    const targetKey = getLikeKey(freshItem);
+    const existingIndex = items.findIndex((candidate) => getLikeKey(candidate) === targetKey);
+    if (existingIndex < 0) continue;
+    const current = items[existingIndex];
+    const next = {
+      ...current,
+      ...freshItem,
+      annotation: freshItem.annotation || current.annotation || "",
+      duration: freshItem.duration || current.duration || 0,
+      name: freshItem.name !== "即梦视频" ? freshItem.name : current.name || freshItem.name,
+      poster: freshItem.poster || current.poster || "",
+      promptContent: freshItem.promptContent.length
+        ? freshItem.promptContent
+        : current.promptContent || [],
+      referenceImages: freshItem.referenceImages.length
+        ? freshItem.referenceImages
+        : current.referenceImages || [],
+      videoHeight: freshItem.videoHeight || current.videoHeight || 0,
+      videoWidth: freshItem.videoWidth || current.videoWidth || 0
+    };
+    if (JSON.stringify(current) === JSON.stringify(next)) continue;
+    items[existingIndex] = next;
+    updated += 1;
+  }
+  if (!updated) return { updated: 0, shared: true, storageTarget: "pixmax-canvas" };
+
+  const result = await pixmaxApiPost("/canvas/node/batch", {
+    fileUuid: options.sharedLikesFileUuid,
+    baseRevision: canvas.revision,
+    create: [],
+    update: [
+      {
+        uuid: ownerNode.uuid,
+        metaData: ownerNode.metaData || "{}",
+        nodeText: buildSharedLikeText(
+          options.sharedLikesOwnerName,
+          items,
+          color,
+          parsed?.settings || {}
+        )
+      }
+    ],
+    delete: []
+  });
+
+  if (!result.success) {
+    if (result.errCode === CANVAS_REVISION_CONFLICT && retryCount > 0) {
+      return refreshSharedExternalLikedItems(freshItems, options, retryCount - 1);
+    }
+    throw new Error(result.errMessage || result.errCode || "即梦视频链接刷新失败。");
+  }
+
+  return { updated, shared: true, storageTarget: "pixmax-canvas" };
+}
+
 async function toggleSharedExternalLike(item, options, retryCount = 1) {
   const canvas = await fetchPixmaxCanvas(options.sharedLikesFileUuid);
   const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], options.sharedLikesOwnerName);
@@ -481,6 +566,7 @@ function normalizeExternalLikeItem(rawItem) {
     linkMayExpire: Boolean(rawItem.linkMayExpire),
     mediaType: "video",
     name: String(rawItem.name || "即梦视频").trim().slice(0, 300),
+    originalUrl: normalizeAssetUrl(rawItem.originalUrl) || url,
     poster: normalizeAssetUrl(rawItem.poster),
     promptContent,
     referenceImages,

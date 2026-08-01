@@ -7,6 +7,7 @@
   const MESSAGE = {
     EAGLE_IMPORT_URL: "pixmax-cloner:eagle-import-url",
     GET_LIKE_STATE: "pixmax-cloner:get-external-like-state",
+    REFRESH_LIKED_ITEMS: "pixmax-cloner:refresh-external-liked-items",
     TOGGLE_LIKE: "pixmax-cloner:toggle-external-like"
   };
   const BUTTON_CLASS = "pixmax-jimeng-like";
@@ -21,6 +22,7 @@
   let scanScheduled = false;
   let stateRefreshTimer = 0;
   let scannedLikeKeySignature = "";
+  let syncedLinkSignature = "";
 
   init();
 
@@ -97,6 +99,28 @@
       .${BUTTON_CLASS}:hover { transform: scale(1.06); background: rgb(30 31 35 / 94%); }
       .${BUTTON_CLASS}[data-liked="true"] {
         border-color: var(--pixmax-jimeng-like-color, ${DEFAULT_COLOR});
+        background: var(--pixmax-jimeng-like-color, ${DEFAULT_COLOR});
+      }
+      .${BUTTON_CLASS}[data-placement="action-bar"] {
+        position: relative;
+        top: auto;
+        right: auto;
+        z-index: auto;
+        width: 36px;
+        height: 36px;
+        flex: none;
+        border: 0;
+        border-radius: 8px;
+        background: var(--pixmax-jimeng-action-background, rgb(35 36 43 / 96%));
+        box-shadow: none;
+        font-size: 20px;
+        backdrop-filter: none;
+      }
+      .${BUTTON_CLASS}[data-placement="action-bar"]:hover {
+        transform: none;
+        filter: brightness(1.12);
+      }
+      .${BUTTON_CLASS}[data-placement="action-bar"][data-liked="true"] {
         background: var(--pixmax-jimeng-like-color, ${DEFAULT_COLOR});
       }
       .${BUTTON_CLASS}:disabled { cursor: wait; opacity: .62; }
@@ -204,12 +228,22 @@
     const host = findVideoCardHost(video);
     if (!host) return;
     host.classList.add(HOST_CLASS);
-    const existing = host.querySelector(`:scope > .${BUTTON_CLASS}`);
+    const actionBar = findVideoActionBar(video);
+    const target = actionBar || host;
+    const existing = actionBar?.querySelector(`:scope > .${BUTTON_CLASS}`)
+      || (host.__pixmaxJimengLikeButton?.isConnected
+        ? host.__pixmaxJimengLikeButton
+        : host.querySelector(`:scope > .${BUTTON_CLASS}`));
     if (existing) {
       existing.__pixmaxJimengVideo = video;
+      existing.__pixmaxJimengHost = host;
+      existing.dataset.placement = actionBar ? "action-bar" : "overlay";
       existing.dataset.likeKey = getJimengLikeKey(video.currentSrc || video.src);
+      if (existing.parentElement !== target) target.append(existing);
+      host.__pixmaxJimengLikeButton = existing;
       renderButton(existing);
-      mountEagleButton(video, host);
+      const eagleButton = mountEagleButton(video, host, actionBar);
+      arrangeActionButtons(actionBar, eagleButton, existing);
       return;
     }
 
@@ -217,6 +251,8 @@
     button.type = "button";
     button.className = BUTTON_CLASS;
     button.__pixmaxJimengVideo = video;
+    button.__pixmaxJimengHost = host;
+    button.dataset.placement = actionBar ? "action-bar" : "overlay";
     button.dataset.likeKey = getJimengLikeKey(video.currentSrc || video.src);
     button.addEventListener("pointerdown", (event) => event.stopPropagation());
     button.addEventListener("click", (event) => {
@@ -225,13 +261,14 @@
       toggleVideoLike(button.__pixmaxJimengVideo || video, button)
         .catch((error) => showToast(error.message || String(error), true));
     });
-    host.append(button);
+    target.append(button);
+    host.__pixmaxJimengLikeButton = button;
     renderButton(button);
-    mountEagleButton(video, host);
+    const eagleButton = mountEagleButton(video, host, actionBar);
+    arrangeActionButtons(actionBar, eagleButton, button);
   }
 
-  function mountEagleButton(video, host) {
-    const actionBar = findVideoActionBar(video);
+  function mountEagleButton(video, host, actionBar = findVideoActionBar(video)) {
     const target = actionBar || host;
     const existing = actionBar?.querySelector(`:scope > .${EAGLE_BUTTON_CLASS}`)
       || (host.__pixmaxJimengEagleButton?.isConnected
@@ -244,7 +281,7 @@
       existing.dataset.placement = actionBar ? "action-bar" : "overlay";
       if (existing.parentElement !== target) target.append(existing);
       if (actionBar) styleEagleButtonLikeNative(existing, actionBar);
-      return;
+      return existing;
     }
     const button = document.createElement("button");
     button.type = "button";
@@ -265,6 +302,22 @@
     target.append(button);
     host.__pixmaxJimengEagleButton = button;
     if (actionBar) styleEagleButtonLikeNative(button, actionBar);
+    return button;
+  }
+
+  function arrangeActionButtons(actionBar, eagleButton, likeButton) {
+    if (!actionBar || !eagleButton?.isConnected || !likeButton?.isConnected) return;
+    const computed = getComputedStyle(eagleButton);
+    const height = Math.round(eagleButton.getBoundingClientRect().height);
+    if (height > 0) {
+      likeButton.style.width = `${height}px`;
+      likeButton.style.height = `${height}px`;
+    }
+    likeButton.style.borderRadius = computed.borderRadius;
+    likeButton.style.setProperty("--pixmax-jimeng-action-background", computed.backgroundColor);
+    const alreadyArranged = likeButton.previousElementSibling === eagleButton
+      && likeButton.nextElementSibling === null;
+    if (!alreadyArranged) actionBar.append(eagleButton, likeButton);
   }
 
   function renderEagleButtonLabel(button, label) {
@@ -401,6 +454,32 @@
     likeColor = normalizeColor(response.color);
     persistLikedStateCache();
     renderAllButtons();
+    refreshLikedVideoLinks(response.likedKeys).catch(() => {});
+  }
+
+  async function refreshLikedVideoLinks(rawKeys) {
+    const keys = new Set((Array.isArray(rawKeys) ? rawKeys : [])
+      .map(normalizeJimengLikeKey)
+      .filter(Boolean));
+    const items = [];
+    for (const video of document.querySelectorAll("video")) {
+      const likeKey = getJimengLikeKey(video.currentSrc || video.src);
+      if (!keys.has(likeKey)) continue;
+      try {
+        items.push(buildJimengLikeItem(video));
+      } catch {
+        // The video may still be loading; a later scan will retry it.
+      }
+    }
+    if (!items.length) return;
+    const signature = items
+      .map((item) => `${item.likeKey}\n${item.url}`)
+      .sort()
+      .join("\n---\n");
+    if (signature === syncedLinkSignature) return;
+    const response = await sendRuntimeMessage({ type: MESSAGE.REFRESH_LIKED_ITEMS, items });
+    if (!response?.ok) throw new Error(response?.error || "无法刷新即梦视频链接。");
+    syncedLinkSignature = signature;
   }
 
   async function toggleVideoLike(video, button) {
@@ -424,7 +503,7 @@
 
   function buildJimengLikeItem(video) {
     const originalUrl = normalizeUrl(video.currentSrc || video.src);
-    const url = canonicalizeVideoUrl(originalUrl);
+    const url = originalUrl;
     const likeKey = getJimengLikeKey(originalUrl);
     if (!url || !likeKey) throw new Error("这个即梦视频没有可收藏的公开链接。");
 
@@ -547,21 +626,6 @@
       ? `@${segment.name || "参考图"}`
       : segment.text || ""
     ).join("").trim();
-  }
-
-  function canonicalizeVideoUrl(value) {
-    const url = normalizeUrl(value);
-    if (!url) return "";
-    try {
-      const parsed = new URL(url);
-      if (/(^|\.)vlabvod\.com$/i.test(parsed.hostname)) {
-        parsed.search = "";
-        parsed.hash = "";
-      }
-      return parsed.href;
-    } catch {
-      return url;
-    }
   }
 
   function getJimengLikeKey(value) {
