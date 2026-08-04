@@ -301,6 +301,8 @@ function matchesSearch(item) {
     item.name,
     item.annotation,
     item.url,
+    item.originalUrl,
+    item.previewUrl,
     item.website,
     item.likedBy,
     item.assetUuid,
@@ -525,7 +527,8 @@ function renderItem(item) {
   const copy = card.querySelector(".copy");
   const remove = card.querySelector(".remove");
 
-  const mediaUrl = normalizeUrl(item.url);
+  const mediaUrl = getReviewMediaUrl(item);
+  const copyUrl = getReviewCopyUrl(item);
   const pageUrl = normalizeUrl(item.website) || mediaUrl;
   const isVideo = isVideoItem(item);
   const isAudio = isAudioUrl(mediaUrl);
@@ -613,13 +616,25 @@ function renderItem(item) {
   }
 
   copy.addEventListener("click", async () => {
-    if (!mediaUrl) return;
-    await navigator.clipboard.writeText(mediaUrl);
+    if (!copyUrl) {
+      copy.textContent = "No original URL";
+      window.setTimeout(() => {
+        copy.textContent = isJimengReviewItem(item) ? "Copy Original URL" : "Copy URL";
+      }, 1600);
+      return;
+    }
+    await navigator.clipboard.writeText(copyUrl);
     copy.textContent = "Copied";
     window.setTimeout(() => {
-      copy.textContent = "Copy URL";
+      copy.textContent = isJimengReviewItem(item) ? "Copy Original URL" : "Copy URL";
     }, 1200);
   });
+  if (isJimengReviewItem(item)) {
+    copy.textContent = "Copy Original URL";
+    copy.title = copyUrl
+      ? "复制即梦完整原片下载链接（包含全部签名参数）"
+      : "此旧记录没有捕获到原片下载链接，请回到即梦重新点官方『下载原片』后刷新收藏";
+  }
 
   if (sharedMode && item.likedBy && item.likedBy !== sharedOptions.ownerName) {
     remove.disabled = true;
@@ -1396,7 +1411,7 @@ ${cards || "    <p>No liked results.</p>"}
 }
 
 function renderExportCard(item) {
-  const mediaUrl = normalizeUrl(item.url);
+  const mediaUrl = getReviewMediaUrl(item);
   const pageUrl = normalizeUrl(item.website);
   const title = item.name || filenameFromUrl(mediaUrl) || "Pixmax result";
   const preview = renderExportPreview(item);
@@ -1440,7 +1455,7 @@ function renderExportPrompt(item) {
 }
 
 function renderExportPreview(item) {
-  const url = normalizeUrl(item?.url);
+  const url = getReviewMediaUrl(item);
   if (!url) return "No preview";
   const escapedUrl = escapeAttribute(url);
   if (isVideoItem(item)) {
@@ -1468,6 +1483,31 @@ function renderExportReferenceImages(item) {
 function normalizeUrl(value) {
   const url = String(value || "").trim();
   return /^https?:\/\//i.test(url) ? url : "";
+}
+
+function isJimengReviewItem(item) {
+  return String(item?.source || "").toLowerCase() === "jimeng"
+    || String(item?.likeKey || "").startsWith("jimeng:");
+}
+
+function getReviewOriginalUrl(item) {
+  if (!isJimengReviewItem(item)) return "";
+  const originalUrl = normalizeUrl(item?.originalUrl);
+  const previewUrl = normalizeUrl(item?.previewUrl);
+  if (!originalUrl || (previewUrl && originalUrl === previewUrl)) return "";
+  return originalUrl;
+}
+
+function getReviewMediaUrl(item) {
+  return getReviewOriginalUrl(item)
+    || normalizeUrl(item?.url)
+    || normalizeUrl(item?.previewUrl);
+}
+
+function getReviewCopyUrl(item) {
+  return isJimengReviewItem(item)
+    ? getReviewOriginalUrl(item)
+    : normalizeUrl(item?.url);
 }
 
 function buildFocusUrl(value, nodeId, item = {}) {
