@@ -5,18 +5,11 @@
   const REQUEST_EVENT = "pixmax-canvas-cloner:request";
   const RESPONSE_SOURCE = "pixmax-canvas-cloner:bridge";
   const LIVE_INTERNALS_KEY = "__pixmaxHubLiveInternals";
-  const FOCUS_PARAM = "pixmaxClonerFocus";
-  const FOCUS_RECT_PARAM = "pixmaxClonerFocusRect";
-  const FOCUS_ZOOM_PARAM = "pixmaxClonerFocusZoom";
-  const FOCUS_COMPLETE_EVENT = "pixmax-canvas-cloner:focus-complete";
   const OFFICIAL_VIEWPORT_STORAGE_PREFIX = "pixmax.genNodeHabit.v1:";
-  let earlyFocusViewportSeed = buildEarlyFocusViewportSeedFromUrl();
+  const earlyFocusViewportSeed = buildEarlyFocusViewportSeedFromUrl();
 
-  installOfficialViewportSeedPatch();
-  installFocusViewportSeedCleanup();
   if (earlyFocusViewportSeed) {
     persistEarlyFocusViewportSeed(earlyFocusViewportSeed);
-    scheduleEarlyFocusViewportSeedExpiry(earlyFocusViewportSeed);
   }
 
   function installLiveInternalsProbe() {
@@ -26,8 +19,6 @@
       installed: true,
       candidates: [],
       controllers: [],
-      flowControllers: [],
-      flowCandidates: [],
       presenceSockets: [],
       presenceMessages: [],
       peerCount: 1,
@@ -56,42 +47,6 @@
     }
 
     internals.remember = remember;
-
-    function rememberFlowController(value, source) {
-      if (!value || typeof value !== "object") return;
-      const keys = Object.getOwnPropertyNames(value);
-      const hasViewportMethod = [
-        "setViewport",
-        "setCenter",
-        "fitView",
-        "zoomTo",
-        "project",
-        "screenToFlowPosition"
-      ].some((key) => typeof value[key] === "function");
-      const hasViewportStore =
-        value.viewport?.set ||
-        value.viewport?.update ||
-        value.transform?.set ||
-        value.store?.setState;
-      if (!hasViewportMethod && !hasViewportStore) return;
-      if (!internals.flowControllers.includes(value)) internals.flowControllers.push(value);
-      internals.flowCandidates.push({
-        foundAt: Date.now(),
-        source,
-        keys: keys.slice(0, 80)
-      });
-      if (internals.flowCandidates.length > 30) internals.flowCandidates.shift();
-    }
-
-    function maybeRememberFlowController(value, source) {
-      if (!value || typeof value !== "object") return;
-      rememberFlowController(value, source);
-      for (const key of ["store", "reactFlow", "flow", "svelteFlow", "viewport", "view"]) {
-        if (value[key] && typeof value[key] === "object") {
-          rememberFlowController(value[key], `${source}.${key}`);
-        }
-      }
-    }
 
     function maybeRememberWorkspaceController(value, source) {
       if (internals.workspaceController) return;
@@ -277,7 +232,7 @@
             if (internals.mapProbeInteresting.length > 20) internals.mapProbeInteresting.shift();
           }
           maybeRememberWorkspaceController(value, "svelte-context-map");
-          maybeRememberFlowController(value, "svelte-context-map");
+          if (internals.workspaceController) restoreMapSet();
         } catch {
           // Keep Map.set transparent.
         }
@@ -285,56 +240,8 @@
       };
       patchedMapSet.__pixmaxHubLiveTargetedProbe = true;
       Map.prototype.set = patchedMapSet;
-      window.setTimeout(restoreMapSet, 60000);
+      window.setTimeout(restoreMapSet, 15000);
     }
-
-    internals.setFlowViewport = (payload = {}) => {
-      const viewport = payload.viewport || {};
-      const rect = payload.rect || {};
-      const x = Number(viewport.x);
-      const y = Number(viewport.y);
-      const zoom = Number(viewport.zoom);
-      if (![x, y, zoom].every(Number.isFinite)) return false;
-      let applied = false;
-      for (const controller of internals.flowControllers) {
-        try {
-          if (typeof controller.setViewport === "function") {
-            controller.setViewport({ x, y, zoom }, { duration: 0 });
-            applied = true;
-          }
-          if (typeof controller.setCenter === "function" && Number.isFinite(Number(rect.x))) {
-            controller.setCenter(
-              Number(rect.x) + Number(rect.width || 0) / 2,
-              Number(rect.y) + Number(rect.height || 0) / 2,
-              { duration: 0, zoom }
-            );
-            applied = true;
-          }
-          if (controller.viewport?.set) {
-            controller.viewport.set({ x, y, zoom });
-            applied = true;
-          }
-          if (controller.viewport?.update) {
-            controller.viewport.update((current) => ({ ...(current || {}), x, y, zoom }));
-            applied = true;
-          }
-          if (controller.transform?.set) {
-            controller.transform.set([x, y, zoom]);
-            applied = true;
-          }
-          if (controller.store?.setState) {
-            controller.store.setState({
-              transform: [x, y, zoom],
-              viewport: { x, y, zoom }
-            });
-            applied = true;
-          }
-        } catch {
-          // Try the next captured flow controller.
-        }
-      }
-      return applied;
-    };
   }
 
   installLiveInternalsProbe();
@@ -424,63 +331,6 @@
     return fetchCanvas();
   }
 
-  seedFocusViewportBeforeAppInit();
-
-  function installOfficialViewportSeedPatch() {
-    if (window.__pixmaxCanvasClonerViewportSeedPatch) return;
-    window.__pixmaxCanvasClonerViewportSeedPatch = true;
-    const originalGetItem = Storage.prototype.getItem;
-    const originalSetItem = Storage.prototype.setItem;
-
-    Storage.prototype.getItem = function patchedGetItem(key) {
-      const value = originalGetItem.call(this, key);
-      if (this !== localStorage || !shouldApplyEarlyFocusViewportSeed(key)) return value;
-      return mergeOfficialViewportStore(value, earlyFocusViewportSeed);
-    };
-
-    Storage.prototype.setItem = function patchedSetItem(key, value) {
-      if (this === localStorage && shouldApplyEarlyFocusViewportSeed(key)) {
-        return originalSetItem.call(this, key, mergeOfficialViewportStore(value, earlyFocusViewportSeed));
-      }
-      return originalSetItem.call(this, key, value);
-    };
-  }
-
-  function installFocusViewportSeedCleanup() {
-    if (window.__pixmaxCanvasClonerViewportSeedCleanup) return;
-    window.__pixmaxCanvasClonerViewportSeedCleanup = true;
-    const clearSeed = () => {
-      earlyFocusViewportSeed = null;
-    };
-    window.addEventListener(FOCUS_COMPLETE_EVENT, clearSeed);
-    document.addEventListener(FOCUS_COMPLETE_EVENT, clearSeed);
-    document.addEventListener(
-      "pointerdown",
-      (event) => {
-        const target = event.target;
-        if (target instanceof Element && target.closest(".svelte-flow")) clearSeed();
-      },
-      true
-    );
-    window.addEventListener(
-      "wheel",
-      (event) => {
-        const target = event.target;
-        if (target instanceof Element && target.closest(".svelte-flow")) clearSeed();
-      },
-      { passive: true, capture: true }
-    );
-  }
-
-  function shouldApplyEarlyFocusViewportSeed(key) {
-    return (
-      earlyFocusViewportSeed &&
-      Date.now() < earlyFocusViewportSeed.expiresAt &&
-      typeof key === "string" &&
-      key.startsWith(OFFICIAL_VIEWPORT_STORAGE_PREFIX)
-    );
-  }
-
   function mergeOfficialViewportStore(value, seed) {
     if (!seed?.fileUuid || !seed?.viewport) return value;
     let data = {};
@@ -499,7 +349,7 @@
 
   function getFocusNodeIdFromUrl() {
     try {
-      return new URL(location.href).searchParams.get(FOCUS_PARAM) || "";
+      return new URL(location.href).searchParams.get("pixmaxClonerFocus") || "";
     } catch {
       return "";
     }
@@ -507,7 +357,7 @@
 
   function getFocusRectFromUrl() {
     try {
-      const value = new URL(location.href).searchParams.get(FOCUS_RECT_PARAM) || "";
+      const value = new URL(location.href).searchParams.get("pixmaxClonerFocusRect") || "";
       const [x, y, width, height] = value.split(",").map((part) => Number(part));
       if (![x, y, width, height].every(Number.isFinite)) return null;
       if (width <= 0 || height <= 0) return null;
@@ -519,7 +369,7 @@
 
   function getFocusZoomFromUrl() {
     try {
-      const zoom = Number(new URL(location.href).searchParams.get(FOCUS_ZOOM_PARAM));
+      const zoom = Number(new URL(location.href).searchParams.get("pixmaxClonerFocusZoom"));
       return Number.isFinite(zoom) && zoom > 0 ? Math.min(Math.max(zoom, 0.7), 1.6) : 1.15;
     } catch {
       return 1.15;
@@ -532,7 +382,6 @@
     const rect = getFocusRectFromUrl();
     if (!fileUuid || !nodeId || !rect) return null;
     return {
-      expiresAt: Date.now() + 8000,
       fileUuid,
       viewport: buildSeedViewportForRect(rect, getFocusZoomFromUrl())
     };
@@ -544,10 +393,6 @@
       height: Number(metaData.height || measured.height || rawNode?.height || 260) || 260,
       width: Number(metaData.width || measured.width || rawNode?.width || 360) || 360
     };
-  }
-
-  function buildSeedViewportForNode(rawNode) {
-    return buildSeedViewportForRect(getRawNodeFocusRect(rawNode), 1.15);
   }
 
   function getRawNodeFocusRect(rawNode) {
@@ -583,36 +428,8 @@
       try {
         localStorage.setItem(key, mergeOfficialViewportStore(localStorage.getItem(key), seed));
       } catch {
-        // Ignore storage failures; the patched getItem still helps during official boot.
+        // Ignore storage failures; content.js will still try DOM-based focusing after boot.
       }
-    }
-  }
-
-  function scheduleEarlyFocusViewportSeedExpiry(seed) {
-    window.setTimeout(() => {
-      if (earlyFocusViewportSeed === seed) earlyFocusViewportSeed = null;
-    }, Math.max(1000, seed.expiresAt - Date.now() + 500));
-  }
-
-  async function seedFocusViewportBeforeAppInit() {
-    if (earlyFocusViewportSeed) return;
-    const fileUuid = getCanvasIdentity().fileUuid;
-    const nodeId = getFocusNodeIdFromUrl();
-    if (!fileUuid || !nodeId) return;
-    try {
-      const canvas = await fetchCanvas(fileUuid);
-      const rawNode = (canvas.nodes || []).find((node) => node?.uuid === nodeId);
-      if (!rawNode) return;
-      const seed = {
-        expiresAt: Date.now() + 6000,
-        fileUuid,
-        viewport: buildSeedViewportForNode(rawNode)
-      };
-      earlyFocusViewportSeed = seed;
-      persistEarlyFocusViewportSeed(seed);
-      scheduleEarlyFocusViewportSeedExpiry(seed);
-    } catch {
-      // The normal content-script focus path will still run if early seeding fails.
     }
   }
 
@@ -2325,15 +2142,6 @@
 
       if (action === "get-canvas-video-history") {
         respond(requestId, true, await getCanvasVideoHistory());
-        return;
-      }
-
-      if (action === "set-flow-viewport") {
-        const internals = window[LIVE_INTERNALS_KEY];
-        respond(requestId, true, {
-          applied: Boolean(internals?.setFlowViewport?.(payload)),
-          candidateCount: internals?.flowControllers?.length || 0
-        });
         return;
       }
 

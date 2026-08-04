@@ -532,9 +532,7 @@ function renderItem(item) {
 
   const mediaUrl = getReviewMediaUrl(item);
   const copyUrl = getReviewCopyUrl(item);
-  const copyLabel = isJimengReviewItem(item)
-    ? item.storageProvider === "pixmax" ? "Copy Pixmax URL" : "Copy Original URL"
-    : "Copy URL";
+  const copyLabel = "复制";
   const pageUrl = normalizeUrl(item.pixmaxCanvasUrl) || normalizeUrl(item.website) || mediaUrl;
   const isVideo = isVideoItem(item);
   const isAudio = isAudioUrl(mediaUrl);
@@ -598,8 +596,11 @@ function renderItem(item) {
     : savedMeta;
   if (savedCodes) meta.title = `归档/下载编码：${savedCodes}`;
   open.href = buildFocusUrl(pageUrl, item.nodeId, item) || mediaUrl || "#";
+  open.textContent = "定位";
+  open.title = item.nodeId
+    ? "打开 Pixmax 画布并定位到这个节点"
+    : "此旧记录没有节点位置，将打开它保存的原始页面";
   if (item.storageProvider === "pixmax" && item.pixmaxCanvasUrl) {
-    open.textContent = "定位 Pixmax";
     open.title = "打开归档画布并定位到这个视频节点";
   }
   renderReviewPanel(item, card, ribbon);
@@ -608,18 +609,20 @@ function renderItem(item) {
     eagle.addEventListener("click", async () => {
       try {
         eagle.disabled = true;
-        eagle.textContent = "Importing...";
+        eagle.textContent = "存入中";
         const response = await sendRuntimeMessage({
           type: MESSAGE.EAGLE_IMPORT_URL,
           item
         });
         if (!response?.ok) throw new Error(response?.error || "Eagle import failed.");
-        eagle.textContent = "Saved";
+        eagle.textContent = "已存";
       } catch (error) {
-        eagle.textContent = error.message || "Import failed";
+        eagle.textContent = "失败";
+        eagle.title = error.message || "Eagle 导入失败";
       } finally {
         window.setTimeout(() => {
-          eagle.textContent = "存入 Eagle";
+          eagle.textContent = "Eagle";
+          eagle.title = "存入 Eagle";
           eagle.disabled = !mediaUrl;
         }, 1500);
       }
@@ -628,14 +631,14 @@ function renderItem(item) {
 
   copy.addEventListener("click", async () => {
     if (!copyUrl) {
-      copy.textContent = "No original URL";
+      copy.textContent = "无链接";
       window.setTimeout(() => {
         copy.textContent = copyLabel;
       }, 1600);
       return;
     }
     await navigator.clipboard.writeText(copyUrl);
-    copy.textContent = "Copied";
+    copy.textContent = "已复制";
     window.setTimeout(() => {
       copy.textContent = copyLabel;
     }, 1200);
@@ -647,6 +650,8 @@ function renderItem(item) {
         ? "复制 Pixmax 归档原片链接"
         : "复制即梦完整原片下载链接（包含全部签名参数）"
       : "此旧记录没有捕获到原片下载链接，请回到即梦重新点官方『下载原片』后刷新收藏";
+  } else {
+    copy.title = "复制媒体链接";
   }
 
   if (sharedMode && item.likedBy && item.likedBy !== sharedOptions.ownerName) {

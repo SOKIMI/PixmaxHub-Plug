@@ -2111,16 +2111,6 @@
       y: current.y,
       zoom: current.zoom
     });
-    let bridgeApplied = false;
-    try {
-      const result = await requestBridge("set-flow-viewport", { rect, viewport: nextViewport }, 1600);
-      bridgeApplied = Boolean(result?.applied);
-    } catch {
-      // DOM transform below is still a useful fallback when the page internals are not captured.
-    }
-    if (bridgeApplied) {
-      window.setTimeout(() => scheduleOfficialWorkflowViewportPersist(nextViewport, nextViewport), 60);
-    }
     window.dispatchEvent(new Event("resize"));
     return true;
   }
@@ -4232,6 +4222,29 @@
     }
   }
 
+  function getFocusRectFromUrl() {
+    try {
+      const value = new URL(location.href).searchParams.get(FOCUS_RECT_PARAM) || "";
+      const [x, y, width, height] = value.split(",").map(Number);
+      return normalizeVideoHistoryFocusRect({ height, width, x, y });
+    } catch {
+      return null;
+    }
+  }
+
+  async function focusNodeFromUrl() {
+    const nodeId = getFocusNodeId();
+    if (!nodeId) return;
+    const rect = getFocusRectFromUrl();
+    if (rect) {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (await centerFlowRectInCurrentCanvas(rect, 1.15, false)) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+      }
+    }
+    focusNode(nodeId, Date.now() + 15000);
+  }
+
   function getFlowViewport(node) {
     return (
       node.closest(".svelte-flow")?.querySelector(".svelte-flow__viewport") ||
@@ -5300,7 +5313,7 @@
       .catch(() => {});
     refreshLikedState();
     syncLiveCollabState();
-    focusNode(getFocusNodeId());
+    focusNodeFromUrl().catch(() => focusNode(getFocusNodeId()));
     globalThis.chrome?.storage?.onChanged?.addListener((changes, areaName) => {
       let videoWatchStateChanged = false;
       if (areaName === "local" && changes[LIKES_STORAGE_KEY]) {
