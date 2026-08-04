@@ -188,8 +188,8 @@ Deno.test("uploads a verified Jimeng original into the target Pixmax canvas and 
     if (ossPutRequest.duplex !== "half" || typeof ossPutRequest.body?.getReader !== "function") {
       throw new Error("The Jimeng original was not streamed directly into Pixmax OSS");
     }
-    if (!/^JM-\d{8}-\d{6} 即梦测试视频\.mp4$/.test(String(authorizeRequest?.fileName || ""))) {
-      throw new Error(`The Pixmax asset filename has no time code: ${JSON.stringify(authorizeRequest)}`);
+    if (!/^JM-\d{8}-\d{6}-[A-Z2-9]{4}\.mp4$/.test(String(authorizeRequest?.fileName || ""))) {
+      throw new Error(`The Pixmax asset filename has no unified time/random code: ${JSON.stringify(authorizeRequest)}`);
     }
     if (archiveCreateNode?.type !== "BASE_VIDEO" || archiveCreateNode?.defaultAssetUuid !== "asset-pixmax-123") {
       throw new Error(`The Pixmax video node was not created correctly: ${JSON.stringify(archiveCreateNode)}`);
@@ -198,8 +198,8 @@ Deno.test("uploads a verified Jimeng original into the target Pixmax canvas and 
     if (archiveMeta.data?.pixmaxHubLikeKey !== "jimeng:test-video-id") {
       throw new Error("The archive node is missing its Jimeng identity metadata");
     }
-    if (!/^JM-\d{8}-\d{6}$/.test(String(archiveMeta.data?.archiveCode || ""))) {
-      throw new Error("The archive node is missing its searchable time code");
+    if (!/^JM-\d{8}-\d{6}-[A-Z2-9]{4}$/.test(String(archiveMeta.data?.archiveCode || ""))) {
+      throw new Error("The archive node is missing its searchable time/random code");
     }
     if (archiveMeta.data?.promptContent?.[1]?.type !== "image"
       || archiveMeta.data?.referenceImages?.[0]?.url !== "https://example.com/reference.jpg") {
@@ -215,9 +215,10 @@ Deno.test("uploads a verified Jimeng original into the target Pixmax canvas and 
       || sharedStoredItem?.referenceImages?.[0]?.url !== "https://example.com/reference.jpg") {
       throw new Error("Review Board lost the Jimeng prompt or reference images");
     }
-    if (sharedStoredItem?.name !== "即梦测试视频"
-      || !String(sharedStoredItem?.pixmaxAssetName || "").startsWith(`${sharedStoredItem.archiveCode} · `)) {
-      throw new Error("Review Board did not preserve Jimeng metadata beside the coded Pixmax asset name");
+    if (sharedStoredItem?.name !== sharedStoredItem?.archiveCode
+      || sharedStoredItem?.pixmaxAssetName !== sharedStoredItem?.archiveCode
+      || authorizeRequest?.fileName !== `${sharedStoredItem?.archiveCode}.mp4`) {
+      throw new Error("Eagle/Pixmax/Review naming did not share one unified code");
     }
     if (sharedStoredItem?.fileUuid !== archiveFileUuid || sharedStoredItem?.nodeId !== archiveCreateNode.uuid) {
       throw new Error("Review Board did not retain the target Pixmax canvas node identity");

@@ -89,6 +89,9 @@ Deno.test("blocks Jimeng preview samples and imports only a verified original", 
       || !String(eagleRequestBody?.annotation || "").includes("https://example.com/reference.jpg")) {
       throw new Error("Eagle annotation lost the Jimeng prompt or reference-image URL");
     }
+    if (!/^JM-\d{8}-\d{6}-[A-Z2-9]{4}$/.test(String(eagleRequestBody?.name || ""))) {
+      throw new Error(`Eagle did not receive the unified time/random filename: ${eagleRequestBody?.name}`);
+    }
 
     const pixmaxResponse = await new Promise((resolve) => {
       runtimeMessageListener({

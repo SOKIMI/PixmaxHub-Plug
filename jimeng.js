@@ -24,7 +24,7 @@
   const MEDIA_CANDIDATE_REQUEST_EVENT = "pixmax-hub:jimeng-request-media-candidates";
   const ORIGINAL_RESOLVE_EVENT = "pixmax-hub:jimeng-resolve-original";
   const ORIGINAL_RESULT_EVENT = "pixmax-hub:jimeng-resolve-original-result";
-  const BUILD_VERSION = "2.0.28";
+  const BUILD_VERSION = "2.0.29";
   const DEFAULT_COLOR = "#ff3864";
   const likedKeys = new Set();
   let likeColor = DEFAULT_COLOR;

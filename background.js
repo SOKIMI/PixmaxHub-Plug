@@ -24,6 +24,7 @@ const PIXMAX_API_ORIGIN = "https://app.pixmax.cn";
 const SHARED_LIKES_MARKER = "PIXMAX_CANVAS_CLONER_LIKES_V1";
 const CANVAS_REVISION_CONFLICT = "Canvas.Revision.Conflict";
 const DEFAULT_LIKE_COLOR = "#ff3864";
+const JIMENG_ARCHIVE_IDENTITY_STORAGE_KEY = "pixmaxJimengArchiveIdentityV1";
 const PIXMAX_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
 const PIXMAX_UPLOAD_POLL_INTERVAL_MS = 3000;
 const PIXMAX_UPLOAD_POLL_LIMIT = 20;
@@ -47,6 +48,7 @@ const jimengProtocolCaptures = new Map();
 const jimengFullTraces = new Map();
 const jimengPixmaxUploadJobs = new Map();
 const pixmaxCanvasMutationLocks = new Map();
+let jimengArchiveIdentityStorageGate = Promise.resolve();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return false;
@@ -767,6 +769,7 @@ async function listEagleFolders() {
 
 async function importUrlToEagle(item) {
   const options = await getStoredOptions();
+  item = await ensureJimengArchiveIdentity(item);
   if (!options.eagleFolderId) {
     throw new Error("请先点击扩展图标，设置 Eagle 目标目录。");
   }
@@ -922,6 +925,8 @@ function filenameFromUrl(value) {
 }
 
 function buildEagleItemName(item, url) {
+  const jimengArchiveCode = normalizeJimengArchiveCode(item?.archiveCode);
+  if (jimengArchiveCode) return jimengArchiveCode;
   const baseName = sanitizeFilename(item?.name || filenameFromUrl(url) || "pixmax-asset");
   if (!isVideoAsset(item, url)) return baseName;
   const downloadCode = getDownloadCode(item);
@@ -1009,7 +1014,8 @@ async function getExternalLikeState(rawKeys) {
 }
 
 async function toggleExternalLike(rawItem, reportProgress = () => {}) {
-  const item = normalizeExternalLikeItem(rawItem);
+  let item = normalizeExternalLikeItem(rawItem);
+  item = await ensureJimengArchiveIdentity(item);
   const options = await getStoredSharedLikeOptions();
   validateJimengCanvasOptions(options);
   reportProgress("preparing", 28, "正在检查 Pixmax Review Board");
@@ -1093,9 +1099,10 @@ async function refreshSharedExternalLikedItems(freshItems, options, retryCount =
       next.assetUuid = current.assetUuid || current.pixmaxAssetUuid || "";
       next.fileUuid = current.fileUuid || JIMENG_ARCHIVE_FILE_UUID;
       next.linkMayExpire = false;
-      next.name = freshItem.name !== "即梦视频"
-        ? freshItem.name
-        : current.name || freshItem.name;
+      next.name = normalizeJimengArchiveCode(current.archiveCode)
+        || normalizeJimengArchiveCode(current.name)
+        || current.name
+        || freshItem.name;
       next.nodeId = current.nodeId || "";
       next.originalUrl = current.originalUrl || current.pixmaxUrl || current.url || "";
       next.pixmaxAssetUuid = current.pixmaxAssetUuid || current.assetUuid || "";
@@ -1266,6 +1273,7 @@ async function pixmaxApiPost(path, body) {
 
 async function archiveJimengLikeInPixmax(item, reportProgress = () => {}) {
   if (item?.source !== "jimeng") return item;
+  item = await ensureJimengArchiveIdentity(item);
   if (item.pixmaxAssetUuid && normalizeAssetUrl(item.pixmaxUrl || item.url)) return item;
 
   const sourceUrl = normalizeAssetUrl(item.originalUrl || item.url);
@@ -1289,21 +1297,25 @@ async function archiveJimengLikeInPixmax(item, reportProgress = () => {}) {
     reportProgress("queued", 32, "相同原片正在上传，等待现有任务完成");
   }
   const asset = await job;
-  return {
+  const resolvedArchiveCode = asset.archiveCode || archiveCode;
+  const resolvedItem = await ensureJimengArchiveIdentity({
     ...archiveItem,
-    archiveCode: asset.archiveCode || archiveCode,
+    archiveCode: resolvedArchiveCode
+  });
+  return {
+    ...resolvedItem,
+    archiveCode: resolvedArchiveCode,
     assetUuid: asset.assetUuid,
     linkMayExpire: false,
     fileUuid: asset.fileUuid,
     nodeId: asset.nodeId,
-    // Review Board keeps Jimeng's original title/prompt/reference structure.
-    // The coded filename is stored separately and is used by the Pixmax asset.
-    name: archiveItem.name,
+    // Eagle, the Pixmax asset/node, and Review Board share one persisted code.
+    name: resolvedArchiveCode,
     originalUrl: asset.url,
     pixmaxAssetUuid: asset.assetUuid,
     pixmaxCanvasUrl: asset.canvasUrl,
     pixmaxPreviewUrl: asset.previewUrl,
-    pixmaxAssetName: asset.displayName || buildJimengArchiveDisplayName(archiveItem, archiveCode),
+    pixmaxAssetName: asset.displayName || buildJimengArchiveDisplayName(resolvedItem, resolvedArchiveCode),
     pixmaxUrl: asset.url,
     sourceUrlIssuedAt: "",
     storageProvider: "pixmax",
@@ -1921,22 +1933,19 @@ function buildPixmaxVideoFileName(name, sourceUrl, contentType, archiveCode = ""
     // Keep the MIME-derived extension.
   }
   const code = normalizeJimengArchiveCode(archiveCode) || buildJimengArchiveCode();
-  const base = sanitizeFilename(String(name || "即梦原片").replace(/\.(mp4|mov|m4v|webm)$/i, ""));
-  return `${code} ${base || "即梦原片"}${extension}`;
+  const base = sanitizeFilename(String(name || "").replace(/\.(mp4|mov|m4v|webm)$/i, ""));
+  if (!base || normalizeJimengArchiveCode(base) === code) return `${code}${extension}`;
+  return `${code} ${base}${extension}`;
 }
 
 function buildJimengArchiveDisplayName(item, archiveCode = "") {
   const code = normalizeJimengArchiveCode(archiveCode) || buildJimengArchiveCode();
-  const rawName = String(item?.name || "即梦原片")
-    .replace(/^JM-\d{8}-\d{6}\s*[·-]?\s*/i, "")
-    .replace(/\.(mp4|mov|m4v|webm)$/i, "")
-    .trim();
-  return `${code} · ${rawName || "即梦原片"}`.slice(0, 300);
+  return code;
 }
 
 function buildJimengArchiveCode(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
-  return [
+  const timestamp = [
     "JM-",
     date.getFullYear(),
     pad(date.getMonth() + 1),
@@ -1946,11 +1955,78 @@ function buildJimengArchiveCode(date = new Date()) {
     pad(date.getMinutes()),
     pad(date.getSeconds())
   ].join("");
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  const randomCode = [...bytes].map((value) => alphabet[value % alphabet.length]).join("");
+  return `${timestamp}-${randomCode}`;
 }
 
 function normalizeJimengArchiveCode(value) {
   const code = String(value || "").trim().toUpperCase();
-  return /^JM-\d{8}-\d{6}$/.test(code) ? code : "";
+  return /^JM-\d{8}-\d{6}(?:-[A-Z2-9]{4})?$/.test(code) ? code : "";
+}
+
+async function ensureJimengArchiveIdentity(item) {
+  if (!item || typeof item !== "object") return item;
+  const website = String(item.website || "");
+  const isJimeng = String(item.source || "").toLowerCase() === "jimeng"
+    || /^https:\/\/jimeng\.jianying\.com\//i.test(website)
+    || String(item.likeKey || "").startsWith("jimeng:");
+  if (!isJimeng) return item;
+
+  const likeKey = normalizeJimengLikeKey(item.likeKey || item.originalUrl || item.url);
+  const suppliedCode = normalizeJimengArchiveCode(item.archiveCode);
+  const archiveCode = likeKey
+    ? await withJimengArchiveIdentityStorageLock(async () => {
+        const stored = await getChromeLocalValue(JIMENG_ARCHIVE_IDENTITY_STORAGE_KEY, {});
+        const identities = stored && typeof stored === "object" ? { ...stored } : {};
+        const existingCode = normalizeJimengArchiveCode(identities[likeKey]?.archiveCode);
+        const code = suppliedCode || existingCode || buildJimengArchiveCode();
+        if (existingCode !== code) {
+          identities[likeKey] = {
+            archiveCode: code,
+            createdAt: identities[likeKey]?.createdAt || new Date().toISOString()
+          };
+          const recentEntries = Object.entries(identities)
+            .sort((first, second) => String(second[1]?.createdAt || "").localeCompare(String(first[1]?.createdAt || "")))
+            .slice(0, 1200);
+          await setChromeLocalValue(JIMENG_ARCHIVE_IDENTITY_STORAGE_KEY, Object.fromEntries(recentEntries));
+        }
+        return code;
+      })
+    : suppliedCode || buildJimengArchiveCode();
+  const rawName = String(item.name || "").trim();
+  const sourceName = String(item.sourceName || "").trim()
+    || (rawName && rawName !== "即梦视频" && !normalizeJimengArchiveCode(rawName) ? rawName : "");
+  return {
+    ...item,
+    archiveCode,
+    name: archiveCode,
+    sourceName
+  };
+}
+
+function withJimengArchiveIdentityStorageLock(task) {
+  const operation = jimengArchiveIdentityStorageGate.catch(() => {}).then(task);
+  jimengArchiveIdentityStorageGate = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+function getChromeLocalValue(key, fallback) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get({ [key]: fallback }, (result) => resolve(result?.[key] ?? fallback));
+  });
+}
+
+function setChromeLocalValue(key, value) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set({ [key]: value }, () => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve();
+    });
+  });
 }
 
 function formatBytes(value) {
