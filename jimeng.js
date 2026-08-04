@@ -16,6 +16,11 @@
   const STYLE_ID = "pixmax-jimeng-like-style";
   const TOAST_ID = "pixmax-jimeng-like-toast";
   const LIKE_STATE_CACHE_KEY = "pixmaxJimengLikeStateCache";
+  const MEDIA_CANDIDATE_EVENT = "pixmax-hub:jimeng-media-candidates";
+  const MEDIA_CANDIDATE_REQUEST_EVENT = "pixmax-hub:jimeng-request-media-candidates";
+  const ORIGINAL_RESOLVE_EVENT = "pixmax-hub:jimeng-resolve-original";
+  const ORIGINAL_RESULT_EVENT = "pixmax-hub:jimeng-resolve-original-result";
+  const BUILD_VERSION = "2.0.19";
   const DEFAULT_COLOR = "#ff3864";
   const likedKeys = new Set();
   let likeColor = DEFAULT_COLOR;
@@ -23,12 +28,17 @@
   let stateRefreshTimer = 0;
   let scannedLikeKeySignature = "";
   let syncedLinkSignature = "";
+  let mediaCandidates = [];
+  let mediaCandidateSignature = "";
+  let lastCapturedProtocolUrl = "";
 
   init();
 
   function init() {
+    document.documentElement.dataset.pixmaxHubVersion = BUILD_VERSION;
     installStyles();
     loadCachedLikedState();
+    for (const button of document.querySelectorAll(".pixmax-jimeng-record-download")) button.remove();
     scanVideoCards();
 
     const observer = new MutationObserver(() => scheduleScan());
@@ -39,7 +49,27 @@
       subtree: true
     });
     window.addEventListener("resize", scheduleScan, { passive: true });
-
+    window.addEventListener(MEDIA_CANDIDATE_EVENT, (event) => {
+      mediaCandidates = Array.isArray(event.detail) ? event.detail.slice(0, 200) : [];
+      const nextCandidateSignature = mediaCandidates
+        .map((candidate) => `${candidate?.contextKey || ""}\n${candidate?.url || ""}`)
+        .sort()
+        .join("\n---\n");
+      if (nextCandidateSignature && nextCandidateSignature !== mediaCandidateSignature) {
+        mediaCandidateSignature = nextCandidateSignature;
+        scheduleLikedStateRefresh();
+      }
+      const captured = mediaCandidates.find((candidate) =>
+        /native-download|download-protocol|download-response/i.test(String(candidate?.hint || ""))
+        && normalizeUrl(candidate?.url)
+      );
+      const capturedUrl = normalizeUrl(captured?.url);
+      if (capturedUrl && capturedUrl !== lastCapturedProtocolUrl) {
+        lastCapturedProtocolUrl = capturedUrl;
+        showToast("已捕获当前卡片的原片链接，现在可直接存 Eagle 或点爱心收藏。");
+      }
+    });
+    window.dispatchEvent(new CustomEvent(MEDIA_CANDIDATE_REQUEST_EVENT));
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "local" && areaName !== "sync") return;
       if (areaName === "local" && changes[LIKE_STATE_CACHE_KEY]) return;
@@ -391,10 +421,15 @@
 
   async function importVideoToEagle(video, button) {
     button.disabled = true;
-    renderEagleButtonLabel(button, "存入中…");
+    renderEagleButtonLabel(button, "读取原片…");
     try {
+      const original = await captureOfficialOriginalUrl(video, { allowIndexedOriginal: true });
+      renderEagleButtonLabel(button, "导入 Eagle…");
       const item = buildJimengLikeItem(video);
-      item.url = item.originalUrl || item.url;
+      item.url = original.url;
+      item.originalUrl = original.url;
+      item.originalVerified = original.verified === true;
+      item.sourceUrlIssuedAt = getSourceUrlIssuedAt(original.url);
       const response = await sendRuntimeMessage({ type: MESSAGE.EAGLE_IMPORT_URL, item });
       if (!response?.ok) throw new Error(response?.error || "存入 Eagle 失败。");
       renderEagleButtonLabel(button, "已存入");
@@ -424,7 +459,7 @@
     while (node && node !== document.body) {
       if (String(node.className || "").includes("record-box-wrapper-")) {
         const record = node.parentElement;
-        return record && String(record.innerText || "").includes("Seedance") ? record : node;
+        return record?.querySelector?.('[class*="record-bottom-slots-"]') ? record : node;
       }
       node = node.parentElement;
     }
@@ -433,10 +468,36 @@
 
   function findVideoActionBar(video) {
     const record = findResultRecord(video);
-    if (!record) return null;
-    return [...record.querySelectorAll('[class*="record-bottom-slots-"]')]
-      .find((element) => element.querySelector("button") || String(element.innerText || "").includes("再次生成"))
-      || null;
+    const selector = '[class*="record-bottom-slots-"],[class*="bottom-slots-"]';
+    const findCandidates = (root) => [...(root?.querySelectorAll?.(selector) || [])]
+      .filter((element) => element.querySelector("button")
+        || /(?:再次生成|重新编辑)/.test(String(element.innerText || "")));
+    const recordCandidates = findCandidates(record);
+    if (recordCandidates.length === 1) return recordCandidates[0];
+
+    const videoRect = video.getBoundingClientRect();
+    let ancestor = video.parentElement;
+    for (let depth = 0; ancestor && ancestor !== document.body && depth < 18; depth += 1, ancestor = ancestor.parentElement) {
+      const candidates = findCandidates(ancestor);
+      if (!candidates.length) continue;
+      return candidates
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const centerDistance = Math.abs(
+            (rect.left + rect.width / 2) - (videoRect.left + videoRect.width / 2)
+          );
+          const verticalDistance = Math.abs(rect.top - videoRect.bottom);
+          const abovePenalty = rect.bottom < videoRect.top ? 100000 : 0;
+          return { element, score: centerDistance + verticalDistance * 0.5 + abovePenalty };
+        })
+        .sort((first, second) => first.score - second.score)[0]?.element || null;
+    }
+    return recordCandidates
+      .map((element) => ({
+        element,
+        distance: Math.abs(element.getBoundingClientRect().top - videoRect.bottom)
+      }))
+      .sort((first, second) => first.distance - second.distance)[0]?.element || null;
   }
 
   async function refreshLikedState() {
@@ -466,7 +527,16 @@
       const likeKey = getJimengLikeKey(video.currentSrc || video.src);
       if (!keys.has(likeKey)) continue;
       try {
-        items.push(buildJimengLikeItem(video));
+        const previewUrl = normalizeUrl(video.currentSrc || video.src);
+        const candidate = findCapturedOriginalCandidate(previewUrl);
+        if (!candidate?.verified) continue;
+        const originalUrl = candidate.url;
+        const item = buildJimengLikeItem(video);
+        item.url = originalUrl;
+        item.originalUrl = originalUrl;
+        item.originalVerified = true;
+        item.sourceUrlIssuedAt = getSourceUrlIssuedAt(originalUrl);
+        items.push(item);
       } catch {
         // The video may still be loading; a later scan will retry it.
       }
@@ -485,7 +555,16 @@
   async function toggleVideoLike(video, button) {
     button.disabled = true;
     try {
+      const original = button.dataset.liked !== "true"
+        ? await captureOfficialOriginalUrl(video)
+        : null;
       const item = buildJimengLikeItem(video);
+      if (original?.url) {
+        item.url = original.url;
+        item.originalUrl = original.url;
+        item.originalVerified = original.verified === true;
+        item.sourceUrlIssuedAt = getSourceUrlIssuedAt(original.url);
+      }
       const response = await sendRuntimeMessage({ type: MESSAGE.TOGGLE_LIKE, item });
       if (!response?.ok) throw new Error(response?.error || "收藏失败。");
       if (response.liked) likedKeys.add(item.likeKey);
@@ -502,9 +581,10 @@
   }
 
   function buildJimengLikeItem(video) {
-    const originalUrl = normalizeUrl(video.currentSrc || video.src);
+    const previewUrl = normalizeUrl(video.currentSrc || video.src);
+    const likeKey = getJimengLikeKey(previewUrl);
+    const originalUrl = resolveOriginalVideoUrl(previewUrl, video);
     const url = originalUrl;
-    const likeKey = getJimengLikeKey(originalUrl);
     if (!url || !likeKey) throw new Error("这个即梦视频没有可收藏的公开链接。");
 
     const record = findResultRecord(video);
@@ -526,7 +606,9 @@
       mediaType: "video",
       name: labels || "即梦视频",
       originalUrl,
+      originalVerified: false,
       poster,
+      previewUrl,
       promptContent,
       referenceImages,
       source: "jimeng",
@@ -537,6 +619,402 @@
       videoWidth: Number(video.videoWidth) || 0,
       website: location.href
     };
+  }
+
+  function installNativeProtocolRecorder() {
+    document.addEventListener("pointerdown", (event) => {
+      if (!event.isTrusted || !(event.target instanceof Element)) return;
+      if (event.target.closest(`.${BUTTON_CLASS},.${EAGLE_BUTTON_CLASS},.${RECORD_BUTTON_CLASS}`)) return;
+      const video = findVideoForRecordedClick(event.target, event.clientX, event.clientY);
+      if (!video) return;
+      const root = findResultRecord(video) || findVideoCardHost(video);
+      const clickable = findRecordedClickable(event.target, root);
+      const recipe = buildRecordedElementRecipe(clickable, root);
+      if (!recipe) return;
+      const previewUrl = normalizeUrl(video.currentSrc || video.src);
+      const contextUrls = getOriginalLookupUrls(video);
+      const activeSession = recordingSession?.expiresAt > Date.now()
+        && getJimengLikeKey(recordingSession.video?.currentSrc || recordingSession.video?.src) === getJimengLikeKey(previewUrl)
+        ? recordingSession
+        : null;
+      pendingElementCapture = {
+        contextUrls,
+        expiresAt: Date.now() + 12000,
+        explicit: Boolean(activeSession),
+        previewUrl,
+        recipe,
+        recordButton: activeSession?.button || null
+      };
+      if (activeSession) showToast("已识别官方下载元素，正在等待即梦返回原片链接…");
+      sendRuntimeMessage({
+        type: MESSAGE.JIMENG_ARM_PROTOCOL_CAPTURE,
+        automatic: false,
+        contextUrls,
+        previewUrl,
+        recipe,
+        requestId: ""
+      }).catch(() => {});
+    }, true);
+  }
+
+  function completePendingElementRecording(candidate) {
+    const pending = pendingElementCapture;
+    if (!pending || pending.expiresAt < Date.now()) {
+      pendingElementCapture = null;
+      return false;
+    }
+    const url = normalizeUrl(candidate?.url);
+    const relatedUrls = [candidate?.contextPreviewUrl, ...(candidate?.previewUrls || [])]
+      .map(normalizeUrl)
+      .filter(Boolean);
+    const previewKey = getJimengLikeKey(pending.previewUrl);
+    const matchesCard = relatedUrls.includes(pending.previewUrl)
+      || relatedUrls.some((value) => getJimengLikeKey(value) === previewKey)
+      || candidate?.contextKey === previewKey;
+    if (!url || !matchesCard) return false;
+
+    pendingElementCapture = null;
+    if (recordingSession?.timer) window.clearTimeout(recordingSession.timer);
+    recordingSession = null;
+    hasDownloadRecipe = true;
+    lastRecordedRecipeUrl = url;
+    lastCapturedProtocolUrl = url;
+    chrome.storage.local.set({ [DOWNLOAD_RECIPE_STORAGE_KEY]: pending.recipe }, () => {
+      if (chrome.runtime.lastError) {
+        hasDownloadRecipe = false;
+        renderAllRecordButtons();
+        showToast(`录制保存失败：${chrome.runtime.lastError.message}`, true);
+        return;
+      }
+      renderAllRecordButtons();
+      showToast("录制完成：已保存官方下载元素和原片协议；以后点爱心或存 Eagle 会自动复用。");
+    });
+    renderAllRecordButtons();
+    return true;
+  }
+
+  function findVideoForRecordedClick(target, clientX, clientY) {
+    let node = target;
+    for (let depth = 0; node && node !== document.body && depth < 18; depth += 1, node = node.parentElement) {
+      const video = node.matches?.("video") ? node : node.querySelector?.("video");
+      if (video) return video;
+    }
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    return [...document.querySelectorAll("video")]
+      .map((video) => ({ rect: video.getBoundingClientRect(), video }))
+      .filter(({ rect }) => clientX >= rect.left && clientX <= rect.right
+        && clientY >= rect.top && clientY <= rect.bottom)
+      .sort((first, second) => first.rect.width * first.rect.height - second.rect.width * second.rect.height)[0]?.video
+      || null;
+  }
+
+  function findRecordedClickable(target, root) {
+    let node = target;
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+      if (node.matches?.("button,a,[role='button'],[class*='card-icon-button-'],[class*='operation-']")) {
+        return root?.contains(node) ? node : null;
+      }
+      if (node === root) break;
+    }
+    return null;
+  }
+
+  function buildRecordedElementRecipe(element, root) {
+    if (!element || !root || element === root) return null;
+    const path = getRecordedElementPath(element, root);
+    if (!path?.length) return null;
+    const video = root.querySelector?.("video");
+    const videoRect = video?.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    return {
+      ariaLabel: String(element.getAttribute("aria-label") || "").trim(),
+      classNames: [...element.classList].filter((name) =>
+        name && name !== BUTTON_CLASS && name !== EAGLE_BUTTON_CLASS && name !== RECORD_BUTTON_CLASS
+      ).slice(0, 12),
+      path,
+      rootKind: findResultRecord(root.querySelector?.("video")) === root ? "record" : "card",
+      tagName: element.tagName,
+      text: String(element.textContent || "").trim().slice(0, 200),
+      title: String(element.getAttribute("title") || "").trim(),
+      videoPosition: videoRect?.width && videoRect?.height ? {
+        x: (elementRect.left + elementRect.width / 2 - videoRect.left) / videoRect.width,
+        y: (elementRect.top + elementRect.height / 2 - videoRect.top) / videoRect.height
+      } : null
+    };
+  }
+
+  function getRecordedElementPath(element, root) {
+    if (!element || !root || element === root) return null;
+    const path = [];
+    let node = element;
+    while (node && node !== root && path.length < 30) {
+      const parent = node.parentElement;
+      if (!parent) return null;
+      const index = [...parent.children].indexOf(node);
+      if (index < 0) return null;
+      path.unshift(index);
+      node = parent;
+    }
+    return node === root ? path : null;
+  }
+
+  function readLocalStorageValue(key) {
+    return new Promise((resolve) => {
+      chrome.storage.local.get({ [key]: null }, (result) => resolve(result[key]));
+    });
+  }
+
+  function locateRecordedElement(video, recipe) {
+    if (!recipe || !Array.isArray(recipe.path)) return null;
+    const root = recipe.rootKind === "card"
+      ? findVideoCardHost(video)
+      : findResultRecord(video) || findVideoCardHost(video);
+    let element = root;
+    for (const rawIndex of recipe.path) {
+      const index = Number(rawIndex);
+      if (!Number.isInteger(index) || index < 0 || !element?.children?.[index]) {
+        element = null;
+        break;
+      }
+      element = element.children[index];
+    }
+    if (matchesRecordedElement(element, recipe)) return element;
+    return locateRecordedElementBySignature(root, video, recipe);
+  }
+
+  function matchesRecordedElement(element, recipe) {
+    if (!element || element.tagName !== String(recipe.tagName || "").toUpperCase()) return false;
+    if (element.closest(`.${BUTTON_CLASS},.${EAGLE_BUTTON_CLASS},.${RECORD_BUTTON_CLASS}`)) return false;
+    const recipeClasses = (Array.isArray(recipe.classNames) ? recipe.classNames : []).filter(Boolean);
+    const classMatch = recipeClasses.some((name) => element.classList.contains(name));
+    const labelMatch = [
+      [recipe.ariaLabel, element.getAttribute("aria-label")],
+      [recipe.title, element.getAttribute("title")],
+      [recipe.text, String(element.textContent || "").trim()]
+    ].some(([expected, actual]) => expected && expected === String(actual || "").trim());
+    return !recipeClasses.length || classMatch || labelMatch;
+  }
+
+  function locateRecordedElementBySignature(root, video, recipe) {
+    const tagName = String(recipe.tagName || "").toLowerCase();
+    if (!tagName || !root?.querySelectorAll) return null;
+    const recipeClasses = (Array.isArray(recipe.classNames) ? recipe.classNames : []).filter(Boolean);
+    const recipePath = (Array.isArray(recipe.path) ? recipe.path : []).map(Number);
+    const videoRect = video?.getBoundingClientRect();
+    const candidates = [...root.querySelectorAll(tagName)]
+      .filter((element) => matchesRecordedElement(element, recipe))
+      .map((element) => {
+        const path = getRecordedElementPath(element, root) || [];
+        const classMatches = recipeClasses.filter((name) => element.classList.contains(name)).length;
+        const labelMatch = [
+          [recipe.ariaLabel, element.getAttribute("aria-label")],
+          [recipe.title, element.getAttribute("title")],
+          [recipe.text, String(element.textContent || "").trim()]
+        ].some(([expected, actual]) => expected && expected === String(actual || "").trim());
+        const alignedDistance = recordedPathDistance(recipePath, path, false);
+        const suffixDistance = recordedPathDistance(recipePath, path, true);
+        let positionDistance = 0;
+        if (recipe.videoPosition && videoRect?.width && videoRect?.height) {
+          const rect = element.getBoundingClientRect();
+          const x = (rect.left + rect.width / 2 - videoRect.left) / videoRect.width;
+          const y = (rect.top + rect.height / 2 - videoRect.top) / videoRect.height;
+          positionDistance = Math.hypot(x - Number(recipe.videoPosition.x), y - Number(recipe.videoPosition.y));
+        }
+        return {
+          element,
+          score: classMatches * 100 + (labelMatch ? 300 : 0)
+            - Math.min(alignedDistance, suffixDistance) * 8
+            - positionDistance * 200
+        };
+      })
+      .sort((first, second) => second.score - first.score);
+    if (!candidates.length || candidates[0].score < 60) return null;
+    if (candidates[1] && candidates[0].score === candidates[1].score) return null;
+    return candidates[0].element;
+  }
+
+  function recordedPathDistance(expected, actual, alignSuffix) {
+    const maxLength = Math.max(expected.length, actual.length);
+    const offsetExpected = alignSuffix ? maxLength - expected.length : 0;
+    const offsetActual = alignSuffix ? maxLength - actual.length : 0;
+    let distance = Math.abs(expected.length - actual.length) * 3;
+    for (let index = 0; index < maxLength; index += 1) {
+      const expectedValue = expected[index - offsetExpected];
+      const actualValue = actual[index - offsetActual];
+      if (expectedValue == null || actualValue == null) continue;
+      distance += Math.abs(expectedValue - actualValue);
+    }
+    return distance;
+  }
+
+  async function invokeRecordedNativeDownload(video, requestId) {
+    const recipe = await readLocalStorageValue(DOWNLOAD_RECIPE_STORAGE_KEY);
+    if (!recipe) return false;
+    const hoverTargets = [...new Set([video, findVideoCardHost(video), findResultRecord(video)].filter(Boolean))];
+    for (const hoverTarget of hoverTargets) {
+      for (const type of ["pointerover", "mouseover", "mouseenter", "mousemove"]) {
+        hoverTarget.dispatchEvent(new MouseEvent(type, { bubbles: true, view: window }));
+      }
+    }
+    let element = null;
+    for (const waitMs of [80, 120, 200, 300]) {
+      await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+      element = locateRecordedElement(video, recipe);
+      if (element) break;
+    }
+    if (!element) return false;
+    const previewUrl = normalizeUrl(video.currentSrc || video.src);
+    const contextUrls = getOriginalLookupUrls(video);
+    const response = await sendRuntimeMessage({
+      type: MESSAGE.JIMENG_ARM_PROTOCOL_CAPTURE,
+      automatic: true,
+      contextUrls,
+      previewUrl,
+      recipe,
+      requestId
+    });
+    if (!response?.ok) return false;
+    window.dispatchEvent(new CustomEvent(AUTOMATIC_NATIVE_EVENT, {
+      detail: { contextUrls, previewUrl, requestId }
+    }));
+    element.click();
+    return true;
+  }
+
+  function captureOfficialOriginalUrl(video, { allowIndexedOriginal = false } = {}) {
+    const previewUrl = normalizeUrl(video.currentSrc || video.src);
+    const likeKey = getJimengLikeKey(previewUrl);
+    const contextUrls = getOriginalLookupUrls(video);
+    if (!previewUrl || !likeKey) return Promise.reject(new Error("这个即梦视频还没有可用的播放器链接。"));
+    const requestId = `jimeng-original-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        window.removeEventListener(ORIGINAL_RESULT_EVENT, onResult);
+        reject(new Error("等待即梦素材协议返回原片 URL 超时。"));
+      }, 18000);
+      const onResult = async (event) => {
+        if (event.detail?.requestId !== requestId) return;
+        const url = normalizeUrl(event.detail?.url);
+        if (!url) {
+          window.clearTimeout(timer);
+          window.removeEventListener(ORIGINAL_RESULT_EVENT, onResult);
+          const resolverError = String(event.detail?.error || "即梦视频数据没有返回原片链接。");
+          reject(new Error(`${resolverError} 已停止使用录制按钮兜底，不会把预览小样存入 Eagle。`));
+          return;
+        }
+        const verified = Boolean(event.detail?.verified)
+          && isVerifiedOfficialOriginalUrl(url, previewUrl);
+        if (!verified) {
+          window.clearTimeout(timer);
+          window.removeEventListener(ORIGINAL_RESULT_EVENT, onResult);
+          reject(new Error(
+            "取得的地址没有通过即梦官方原片校验，已阻止把预览小样存入 Eagle。"
+          ));
+          return;
+        }
+        window.clearTimeout(timer);
+        window.removeEventListener(ORIGINAL_RESULT_EVENT, onResult);
+        mediaCandidates = [{
+          contextKey: likeKey,
+          contextPreviewUrl: previewUrl,
+          hint: "jimeng-native-download",
+          observedAt: Date.now(),
+          previewUrls: contextUrls,
+          url
+        }, ...mediaCandidates.filter((item) => item?.url !== url)].slice(0, 200);
+        resolve({
+          filename: String(event.detail?.filename || ""),
+          source: String(event.detail?.source || ""),
+          url,
+          verified: true
+        });
+      };
+      window.addEventListener(ORIGINAL_RESULT_EVENT, onResult);
+      window.dispatchEvent(new CustomEvent(ORIGINAL_RESOLVE_EVENT, {
+        detail: {
+          contextUrls,
+          forceRefresh: Boolean(allowIndexedOriginal),
+          likeKey,
+          previewUrl,
+          requestId
+        }
+      }));
+    });
+  }
+
+  function isVerifiedOfficialOriginalUrl(originalUrl, previewUrl) {
+    if (!originalUrl || originalUrl === previewUrl) return false;
+    try {
+      const original = new URL(originalUrl);
+      const preview = new URL(previewUrl);
+      const originalBitrate = Number(original.searchParams.get("br") || original.searchParams.get("bt"));
+      const previewBitrate = Number(preview.searchParams.get("br") || preview.searchParams.get("bt"));
+      if (originalBitrate > 0 && previewBitrate > 0 && originalBitrate <= previewBitrate * 1.2) return false;
+      const officialHost = /(?:^|\.)jimeng\.com$/i.test(original.hostname);
+      const highBitrate = originalBitrate > 0
+        && (!previewBitrate || originalBitrate > previewBitrate * 1.2);
+      const videoPath = /(?:video|tos|obj|media)/i.test(original.pathname)
+        && /video_mp4|\.mp4(?:$|[?#])/i.test(`${original.search} ${original.pathname}`);
+      return videoPath && (officialHost || highBitrate);
+    } catch {
+      return false;
+    }
+  }
+
+  function getOriginalLookupUrls(video) {
+    const urls = [
+      video?.currentSrc,
+      video?.src,
+      video?.poster,
+      ...[...(findVideoCardHost(video)?.querySelectorAll("img") || [])]
+        .map((image) => image.currentSrc || image.src)
+    ]
+      .map(normalizeUrl)
+      .filter(Boolean);
+    return [...new Set(urls)].slice(0, 30);
+  }
+
+  function resolveOriginalVideoUrl(previewUrl, video) {
+    const previewKey = getJimengLikeKey(previewUrl);
+    window.dispatchEvent(new CustomEvent(MEDIA_CANDIDATE_REQUEST_EVENT, {
+      detail: { likeKey: previewKey, previewUrl }
+    }));
+    return findCapturedOriginalUrl(previewUrl) || previewUrl;
+  }
+
+  function findCapturedOriginalUrl(previewUrl) {
+    return findCapturedOriginalCandidate(previewUrl)?.url || "";
+  }
+
+  function findCapturedOriginalCandidate(previewUrl) {
+    const previewKey = getJimengLikeKey(previewUrl);
+    const ranked = mediaCandidates
+      .map((candidate) => {
+        const url = normalizeUrl(candidate?.url);
+        const relatedPreviewUrls = [candidate?.contextPreviewUrl, ...(candidate?.previewUrls || [])]
+          .map(normalizeUrl)
+          .filter(Boolean);
+        const matchesPreview = candidate?.contextKey === previewKey
+          || relatedPreviewUrls.includes(previewUrl)
+          || relatedPreviewUrls.some((value) => getJimengLikeKey(value) === previewKey);
+        if (!url || !matchesPreview) return null;
+        const hint = String(candidate?.hint || "").toLowerCase();
+        const lowerUrl = url.toLowerCase();
+        let score = 0;
+        if (url === previewUrl) score -= 80;
+        if (getJimengLikeKey(url) === previewKey) score += 80;
+        if (/download|original|origin|source|no_watermark|without_watermark|unwatermark|原片|原视频|下载/.test(hint)) score += 120;
+        if (/scenevideourls|scene_video_urls/.test(hint)) score += 100;
+        if (/download|original|origin|source|no_watermark|without_watermark|unwatermark/.test(lowerUrl)) score += 70;
+        if (/preview|play|transcode|low|watermark/.test(`${hint} ${lowerUrl}`)) score -= 45;
+        if (hint.includes("react")) score += 25;
+        const protocolHint = /native-download|download-protocol|webrequest-recording/i.test(hint);
+        const verified = protocolHint && isVerifiedOfficialOriginalUrl(url, previewUrl);
+        return { score: score + (verified ? 200 : 0), url, verified };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+    return ranked[0]?.score >= 70 ? ranked[0] : null;
   }
 
   function extractPrompt(record) {
@@ -675,7 +1153,7 @@
     const toast = document.createElement("div");
     toast.id = TOAST_ID;
     toast.dataset.error = error ? "true" : "false";
-    toast.textContent = message;
+    toast.textContent = error ? `[PixmaxHub ${BUILD_VERSION}] ${message}` : message;
     document.body.append(toast);
     window.setTimeout(() => toast.remove(), error ? 4200 : 2300);
   }

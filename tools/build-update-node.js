@@ -12,6 +12,7 @@ const FILES = [
   "bridge.js",
   "content.js",
   "jimeng.js",
+  "jimeng-page.js",
   "relay.js",
   "background.js",
   "popup.html",

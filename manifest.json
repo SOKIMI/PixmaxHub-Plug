@@ -1,17 +1,25 @@
 {
   "manifest_version": 3,
   "name": "PixmaxHub Plug",
-  "version": "1.5.7",
+  "version": "2.0.19",
   "description": "Add Pixmax and Jimeng collection helpers, Eagle import, and a shared team review board.",
   "permissions": [
-    "storage"
+    "storage",
+    "webRequest"
   ],
   "host_permissions": [
     "https://app.pixmax.cn/*",
     "https://jimeng.jianying.com/*",
+    "https://*.jianying.com/*",
+    "https://*.jimeng.com/*",
     "https://*.vlabvod.com/*",
     "https://*.vlabstatic.com/*",
     "https://*.byteimg.com/*",
+    "https://*.ibytedtos.com/*",
+    "https://*.bytecdn.cn/*",
+    "https://*.bytecdn.com/*",
+    "https://*.volces.com/*",
+    "https://*.volccdn.com/*",
     "https://api.github.com/*",
     "https://codeload.github.com/*",
     "https://raw.githubusercontent.com/*",
@@ -41,6 +49,16 @@
         "content.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://jimeng.jianying.com/*"
+      ],
+      "js": [
+        "jimeng-page.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
     },
     {
       "matches": [
