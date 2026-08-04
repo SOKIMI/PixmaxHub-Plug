@@ -1,9 +1,11 @@
 Deno.test("blocks Jimeng preview samples and imports only a verified original", async () => {
   let runtimeMessageListener;
   let eagleFetchCalls = 0;
+  let eagleRequestBody = null;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_url, options = {}) => {
     eagleFetchCalls += 1;
+    eagleRequestBody = JSON.parse(options.body || "{}");
     return new Response(JSON.stringify({ status: "success", data: {} }), {
       headers: { "content-type": "application/json" },
       status: 200
@@ -61,9 +63,11 @@ Deno.test("blocks Jimeng preview samples and imports only a verified original", 
           likeKey: "jimeng:sample",
           mediaType: "video",
           name: "即梦视频",
+          annotation: "镜头缓慢推近 @参考图 1",
           originalUrl,
           originalVerified,
           previewUrl,
+          referenceImages: [{ name: "参考图 1", url: "https://example.com/reference.jpg" }],
           source: "jimeng",
           url: originalUrl,
           website: "https://jimeng.jianying.com/ai-tool/generate?type=video"
@@ -81,6 +85,32 @@ Deno.test("blocks Jimeng preview samples and imports only a verified original", 
     const goodResponse = await sendImport(originalUrl, true);
     if (!goodResponse?.ok) throw new Error(`verified original was rejected: ${JSON.stringify(goodResponse)}`);
     if (eagleFetchCalls !== 1) throw new Error("verified original was not sent to Eagle exactly once");
+    if (!String(eagleRequestBody?.annotation || "").includes("镜头缓慢推近")
+      || !String(eagleRequestBody?.annotation || "").includes("https://example.com/reference.jpg")) {
+      throw new Error("Eagle annotation lost the Jimeng prompt or reference-image URL");
+    }
+
+    const pixmaxResponse = await new Promise((resolve) => {
+      runtimeMessageListener({
+        type: "pixmax-cloner:eagle-import-url",
+        item: {
+          annotation: "Pixmax 归档提示词",
+          likeKey: "jimeng:archived",
+          mediaType: "video",
+          name: "即梦归档视频",
+          originalUrl: "https://cdn.pixmax.example/archive/original.mp4",
+          pixmaxAssetUuid: "asset-pixmax-123",
+          referenceImages: [{ name: "参考图 1", url: "https://example.com/archive-reference.jpg" }],
+          source: "jimeng",
+          storageProvider: "pixmax",
+          url: "https://cdn.pixmax.example/archive/original.mp4",
+          website: "https://jimeng.jianying.com/ai-tool/generate?type=video"
+        }
+      }, { tab: { id: 1 } }, resolve);
+    });
+    if (!pixmaxResponse?.ok || eagleFetchCalls !== 2) {
+      throw new Error(`Pixmax archived Jimeng video was rejected by Eagle: ${JSON.stringify(pixmaxResponse)}`);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

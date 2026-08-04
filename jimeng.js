@@ -8,19 +8,23 @@
     EAGLE_IMPORT_URL: "pixmax-cloner:eagle-import-url",
     GET_LIKE_STATE: "pixmax-cloner:get-external-like-state",
     REFRESH_LIKED_ITEMS: "pixmax-cloner:refresh-external-liked-items",
-    TOGGLE_LIKE: "pixmax-cloner:toggle-external-like"
+    TOGGLE_LIKE: "pixmax-cloner:toggle-external-like",
+    UPLOAD_PROGRESS: "pixmax-cloner:jimeng-upload-progress"
   };
   const BUTTON_CLASS = "pixmax-jimeng-like";
   const EAGLE_BUTTON_CLASS = "pixmax-jimeng-eagle";
   const HOST_CLASS = "pixmax-jimeng-like-host";
   const STYLE_ID = "pixmax-jimeng-like-style";
   const TOAST_ID = "pixmax-jimeng-like-toast";
+  const QUEUE_ID = "pixmax-jimeng-upload-queue";
+  const QUEUE_LIST_CLASS = "pixmax-jimeng-upload-list";
+  const MAX_CONCURRENT_UPLOADS = 1;
   const LIKE_STATE_CACHE_KEY = "pixmaxJimengLikeStateCache";
   const MEDIA_CANDIDATE_EVENT = "pixmax-hub:jimeng-media-candidates";
   const MEDIA_CANDIDATE_REQUEST_EVENT = "pixmax-hub:jimeng-request-media-candidates";
   const ORIGINAL_RESOLVE_EVENT = "pixmax-hub:jimeng-resolve-original";
   const ORIGINAL_RESULT_EVENT = "pixmax-hub:jimeng-resolve-original-result";
-  const BUILD_VERSION = "2.0.19";
+  const BUILD_VERSION = "2.0.28";
   const DEFAULT_COLOR = "#ff3864";
   const likedKeys = new Set();
   let likeColor = DEFAULT_COLOR;
@@ -31,6 +35,10 @@
   let mediaCandidates = [];
   let mediaCandidateSignature = "";
   let lastCapturedProtocolUrl = "";
+  let activeUploadCount = 0;
+  let originalResolutionGate = Promise.resolve();
+  let uploadQueueCollapsed = false;
+  const uploadJobs = new Map();
 
   init();
 
@@ -49,6 +57,11 @@
       subtree: true
     });
     window.addEventListener("resize", scheduleScan, { passive: true });
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.type !== MESSAGE.UPLOAD_PROGRESS) return false;
+      updateUploadJobFromBackground(message);
+      return false;
+    });
     window.addEventListener(MEDIA_CANDIDATE_EVENT, (event) => {
       mediaCandidates = Array.isArray(event.detail) ? event.detail.slice(0, 200) : [];
       const nextCandidateSignature = mediaCandidates
@@ -221,6 +234,135 @@
         font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       #${TOAST_ID}[data-error="true"] { color: #ffaaa2; }
+      #${QUEUE_ID} {
+        position: fixed;
+        right: 24px;
+        top: 72px;
+        bottom: auto;
+        z-index: 2147483646;
+        width: min(390px, calc(100vw - 32px));
+        max-height: min(520px, calc(100vh - 48px));
+        overflow: hidden;
+        border: 1px solid rgb(255 255 255 / 14%);
+        border-radius: 14px;
+        background: rgb(18 19 22 / 96%);
+        color: #f7f7f8;
+        box-shadow: 0 18px 58px rgb(0 0 0 / 48%);
+        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        backdrop-filter: blur(16px);
+      }
+      #${QUEUE_ID}[hidden] { display: none !important; }
+      #${QUEUE_ID}[data-collapsed="true"] { width: min(300px, calc(100vw - 32px)); }
+      #${QUEUE_ID}[data-collapsed="true"] .${QUEUE_LIST_CLASS} { display: none; }
+      #${QUEUE_ID} .pixmax-jimeng-queue-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 14px 10px;
+        border-bottom: 1px solid rgb(255 255 255 / 9%);
+      }
+      #${QUEUE_ID} .pixmax-jimeng-queue-title { font-size: 13px; font-weight: 650; }
+      #${QUEUE_ID} .pixmax-jimeng-queue-count { color: rgb(255 255 255 / 58%); }
+      #${QUEUE_ID} .pixmax-jimeng-queue-summary {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-queue-toggle {
+        border: 1px solid rgb(255 255 255 / 14%);
+        border-radius: 7px;
+        padding: 4px 7px;
+        background: rgb(255 255 255 / 6%);
+        color: rgb(255 255 255 / 76%);
+        cursor: pointer;
+        font: inherit;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-queue-toggle:hover { background: rgb(255 255 255 / 11%); }
+      #${QUEUE_ID} .${QUEUE_LIST_CLASS} {
+        display: grid;
+        gap: 8px;
+        max-height: min(450px, calc(100vh - 108px));
+        overflow: auto;
+        padding: 10px;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-upload-job {
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        border: 1px solid rgb(255 255 255 / 9%);
+        border-radius: 10px;
+        padding: 8px;
+        background: rgb(255 255 255 / 4%);
+      }
+      #${QUEUE_ID} .pixmax-jimeng-upload-job[data-state="failed"] {
+        border-color: rgb(255 75 75 / 70%);
+        background: rgb(126 22 22 / 28%);
+      }
+      #${QUEUE_ID} .pixmax-jimeng-upload-job[data-state="success"] {
+        border-color: rgb(57 201 122 / 52%);
+        background: rgb(24 111 66 / 24%);
+      }
+      #${QUEUE_ID} .pixmax-jimeng-job-poster {
+        width: 58px;
+        height: 42px;
+        border-radius: 7px;
+        object-fit: cover;
+        background: #090a0c;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-job-poster-fallback {
+        display: grid;
+        width: 58px;
+        height: 42px;
+        place-items: center;
+        border-radius: 7px;
+        background: linear-gradient(135deg, #262936, #121318);
+        color: rgb(255 255 255 / 50%);
+        font-size: 17px;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-job-main { min-width: 0; }
+      #${QUEUE_ID} .pixmax-jimeng-job-name {
+        overflow: hidden;
+        margin-bottom: 3px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-job-status {
+        overflow: hidden;
+        color: rgb(255 255 255 / 62%);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${QUEUE_ID} [data-state="failed"] .pixmax-jimeng-job-status { color: #ff8c83; }
+      #${QUEUE_ID} [data-state="success"] .pixmax-jimeng-job-status { color: #67dfa0; }
+      #${QUEUE_ID} .pixmax-jimeng-job-progress {
+        height: 3px;
+        margin-top: 7px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgb(255 255 255 / 10%);
+      }
+      #${QUEUE_ID} .pixmax-jimeng-job-progress > span {
+        display: block;
+        width: var(--pixmax-job-progress, 4%);
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #8d6bff, #4ecbff);
+        transition: width .22s ease;
+      }
+      #${QUEUE_ID} [data-state="failed"] .pixmax-jimeng-job-progress > span { background: #ff5f57; }
+      #${QUEUE_ID} [data-state="success"] .pixmax-jimeng-job-progress > span { background: #42d887; }
+      #${QUEUE_ID} .pixmax-jimeng-job-retry {
+        border: 1px solid rgb(255 116 106 / 65%);
+        border-radius: 7px;
+        padding: 5px 8px;
+        background: rgb(255 83 73 / 15%);
+        color: #ffaaa3;
+        cursor: pointer;
+        font: inherit;
+      }
+      #${QUEUE_ID} .pixmax-jimeng-job-retry:hover { background: rgb(255 83 73 / 25%); }
     `;
     document.documentElement.append(style);
   }
@@ -423,9 +565,16 @@
     button.disabled = true;
     renderEagleButtonLabel(button, "读取原片…");
     try {
+      const beforeDownloadItem = buildJimengLikeItem(video);
       const original = await captureOfficialOriginalUrl(video, { allowIndexedOriginal: true });
       renderEagleButtonLabel(button, "导入 Eagle…");
-      const item = buildJimengLikeItem(video);
+      const refreshedVideo = video.isConnected
+        ? video
+        : findVideoByLikeKey(beforeDownloadItem.likeKey);
+      const item = refreshedVideo
+        ? mergeJimengMetadataSnapshot(beforeDownloadItem, buildJimengLikeItem(refreshedVideo))
+        : beforeDownloadItem;
+      assertJimengMetadataCaptured(item);
       item.url = original.url;
       item.originalUrl = original.url;
       item.originalVerified = original.verified === true;
@@ -464,6 +613,24 @@
       node = node.parentElement;
     }
     return null;
+  }
+
+  function findMetadataRecord(video) {
+    const actionRecord = findResultRecord(video);
+    let node = actionRecord || video.parentElement;
+    let fallback = actionRecord;
+    for (let depth = 0; node && node !== document.body && depth < 12; depth += 1) {
+      const hasPrompt = Boolean(findPromptElement(node));
+      const hasReferences = Boolean(node.querySelector?.('[class*="reference-image-"] img'));
+      const hasLabels = Boolean(node.querySelector?.('[class^="labels-"], [class*=" labels-"]'));
+      // The Jimeng reference strip and prompt editor can be sibling regions.
+      // Never stop at the first thumbnail-only wrapper: keep climbing until the
+      // complete prompt is inside the same metadata scope.
+      if (hasPrompt) return node;
+      if ((hasReferences || hasLabels) && fallback === actionRecord) fallback = node;
+      node = node.parentElement;
+    }
+    return fallback;
   }
 
   function findVideoActionBar(video) {
@@ -529,13 +696,17 @@
       try {
         const previewUrl = normalizeUrl(video.currentSrc || video.src);
         const candidate = findCapturedOriginalCandidate(previewUrl);
-        if (!candidate?.verified) continue;
-        const originalUrl = candidate.url;
         const item = buildJimengLikeItem(video);
-        item.url = originalUrl;
-        item.originalUrl = originalUrl;
-        item.originalVerified = true;
-        item.sourceUrlIssuedAt = getSourceUrlIssuedAt(originalUrl);
+        // Prompt/reference metadata can be refreshed without asking Jimeng for
+        // another expiring original URL. Background keeps an archived Pixmax
+        // URL intact when this is a metadata-only refresh.
+        if (candidate?.verified) {
+          const originalUrl = candidate.url;
+          item.url = originalUrl;
+          item.originalUrl = originalUrl;
+          item.originalVerified = true;
+          item.sourceUrlIssuedAt = getSourceUrlIssuedAt(originalUrl);
+        }
         items.push(item);
       } catch {
         // The video may still be loading; a later scan will retry it.
@@ -543,7 +714,13 @@
     }
     if (!items.length) return;
     const signature = items
-      .map((item) => `${item.likeKey}\n${item.url}`)
+      .map((item) => JSON.stringify([
+        item.likeKey,
+        item.url,
+        item.annotation,
+        item.promptContent,
+        item.referenceImages
+      ]))
       .sort()
       .join("\n---\n");
     if (signature === syncedLinkSignature) return;
@@ -553,31 +730,301 @@
   }
 
   async function toggleVideoLike(video, button) {
+    if (button.dataset.liked !== "true") {
+      enqueueUploadJob(video, button);
+      return;
+    }
+
     button.disabled = true;
     try {
-      const original = button.dataset.liked !== "true"
-        ? await captureOfficialOriginalUrl(video)
-        : null;
       const item = buildJimengLikeItem(video);
-      if (original?.url) {
-        item.url = original.url;
-        item.originalUrl = original.url;
-        item.originalVerified = original.verified === true;
-        item.sourceUrlIssuedAt = getSourceUrlIssuedAt(original.url);
-      }
       const response = await sendRuntimeMessage({ type: MESSAGE.TOGGLE_LIKE, item });
       if (!response?.ok) throw new Error(response?.error || "收藏失败。");
-      if (response.liked) likedKeys.add(item.likeKey);
-      else likedKeys.delete(item.likeKey);
+      likedKeys.delete(item.likeKey);
       likeColor = normalizeColor(response.color);
       persistLikedStateCache();
       renderAllButtons();
-      showToast(response.liked
-        ? "已写入 Pixmax 共享画布 Review Board。"
-        : "已从 Pixmax 共享画布 Review Board 移除。");
+      showToast("已从 Pixmax 共享画布 Review Board 移除。");
     } finally {
       button.disabled = false;
     }
+  }
+
+  function enqueueUploadJob(video, button) {
+    const item = buildJimengLikeItem(video);
+    const existing = uploadJobs.get(item.likeKey);
+    if (existing && existing.state !== "failed") {
+      showToast("这个视频已经在 Pixmax 上传队列里。");
+      return;
+    }
+    if (existing?.removeTimer) window.clearTimeout(existing.removeTimer);
+    const job = existing || {
+      attempt: 0,
+      createdAt: Date.now(),
+      id: item.likeKey,
+      removeTimer: 0
+    };
+    Object.assign(job, {
+      attempt: job.attempt + 1,
+      button,
+      error: "",
+      item: mergeJimengMetadataSnapshot(job.item, item),
+      progress: 4,
+      state: "queued",
+      status: activeUploadCount >= MAX_CONCURRENT_UPLOADS ? "等待上传" : "准备获取即梦原片",
+      video
+    });
+    uploadJobs.set(job.id, job);
+    button.disabled = true;
+    renderUploadQueue();
+    pumpUploadQueue();
+  }
+
+  function mergeJimengMetadataSnapshot(previous, current) {
+    if (!previous) return current;
+    return {
+      ...previous,
+      ...current,
+      annotation: current.annotation || previous.annotation || "",
+      poster: current.poster || previous.poster || "",
+      promptContent: current.promptContent?.length ? current.promptContent : previous.promptContent || [],
+      referenceImages: current.referenceImages?.length ? current.referenceImages : previous.referenceImages || []
+    };
+  }
+
+  function assertJimengMetadataCaptured(item) {
+    const promptLength = String(item?.annotation || "").replace(/\s+/g, "").length;
+    const referenceCount = Array.isArray(item?.referenceImages) ? item.referenceImages.length : 0;
+    if (!promptLength) {
+      throw new Error("没有读取到当前视频的完整提示词，已停止存入 Eagle/Pixmax，避免再生成空记录。");
+    }
+    return `已读取提示词 ${promptLength} 字 · 参考图 ${referenceCount} 张`;
+  }
+
+  function pumpUploadQueue() {
+    while (activeUploadCount < MAX_CONCURRENT_UPLOADS) {
+      const job = [...uploadJobs.values()]
+        .filter((candidate) => candidate.state === "queued")
+        .sort((first, second) => first.createdAt - second.createdAt)[0];
+      if (!job) break;
+      activeUploadCount += 1;
+      runUploadJob(job).finally(() => {
+        activeUploadCount = Math.max(0, activeUploadCount - 1);
+        renderUploadQueue();
+        pumpUploadQueue();
+      });
+    }
+    renderUploadQueue();
+  }
+
+  async function runUploadJob(job) {
+    try {
+      updateUploadJob(job, {
+        progress: 10,
+        state: "resolving",
+        status: "正在获取即梦官方原片"
+      });
+      const currentVideo = job.video?.isConnected ? job.video : findVideoByLikeKey(job.id);
+      if (!currentVideo) throw new Error("当前页面已找不到这个视频卡片，请刷新即梦页面后重试。");
+      job.video = currentVideo;
+      job.item = mergeJimengMetadataSnapshot(job.item, buildJimengLikeItem(currentVideo));
+      const original = await withOriginalResolutionLock(() => captureOfficialOriginalUrl(currentVideo));
+      if (!original?.url || original.verified !== true) {
+        throw new Error("没有拿到通过校验的即梦官方原片链接。");
+      }
+      // This matches the proven 2.0.19 order: Jimeng's official download
+      // action materializes the complete prompt/reference DOM, so capture the
+      // card again after that action and merge it with the pre-action snapshot.
+      const refreshedVideo = currentVideo.isConnected
+        ? currentVideo
+        : findVideoByLikeKey(job.id);
+      if (refreshedVideo) {
+        job.video = refreshedVideo;
+        job.item = mergeJimengMetadataSnapshot(job.item, buildJimengLikeItem(refreshedVideo));
+      }
+      const metadataSummary = assertJimengMetadataCaptured(job.item);
+      Object.assign(job.item, {
+        originalUrl: original.url,
+        originalVerified: true,
+        sourceUrlIssuedAt: getSourceUrlIssuedAt(original.url),
+        url: original.url
+      });
+      updateUploadJob(job, {
+        progress: 24,
+        state: "uploading",
+        status: `${metadataSummary}，正在传入 Pixmax`
+      });
+      const response = await sendRuntimeMessage({
+        type: MESSAGE.TOGGLE_LIKE,
+        item: job.item,
+        jobId: job.id
+      });
+      if (!response?.ok) throw new Error(response?.error || "收藏失败。");
+      if (!response.liked) throw new Error("Review Board 没有保留这条收藏，请重试。");
+      likedKeys.add(job.id);
+      likeColor = normalizeColor(response.color);
+      persistLikedStateCache();
+      renderAllButtons();
+      updateUploadJob(job, {
+        progress: 100,
+        state: "success",
+        status: "已上传 Pixmax 并写入 Review Board"
+      });
+      job.button.disabled = false;
+      job.removeTimer = window.setTimeout(() => {
+        if (uploadJobs.get(job.id) !== job || job.state !== "success") return;
+        uploadJobs.delete(job.id);
+        renderUploadQueue();
+      }, 2600);
+    } catch (error) {
+      updateUploadJob(job, {
+        error: error?.message || String(error),
+        progress: Math.max(6, Number(job.progress) || 0),
+        state: "failed",
+        status: error?.message || String(error)
+      });
+      if (job.button) job.button.disabled = false;
+    }
+  }
+
+  async function withOriginalResolutionLock(task) {
+    const previous = originalResolutionGate.catch(() => {});
+    let release;
+    originalResolutionGate = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  }
+
+  function findVideoByLikeKey(likeKey) {
+    return [...document.querySelectorAll("video")].find((video) =>
+      getJimengLikeKey(video.currentSrc || video.src) === likeKey
+    ) || null;
+  }
+
+  function updateUploadJobFromBackground(message) {
+    const job = uploadJobs.get(String(message.jobId || message.likeKey || ""));
+    if (!job || job.state === "success" || job.state === "failed") return;
+    updateUploadJob(job, {
+      progress: Number(message.progress) || job.progress,
+      state: String(message.state || job.state),
+      status: String(message.status || job.status)
+    });
+  }
+
+  function updateUploadJob(job, values) {
+    Object.assign(job, values);
+    renderUploadQueue();
+  }
+
+  function retryUploadJob(jobId) {
+    const job = uploadJobs.get(jobId);
+    if (!job || job.state !== "failed") return;
+    const currentVideo = findVideoByLikeKey(job.id) || job.video;
+    const currentButton = [...document.querySelectorAll(`.${BUTTON_CLASS}`)].find((button) =>
+      button.dataset.likeKey === job.id
+    ) || job.button;
+    if (!currentVideo || !currentButton) {
+      job.status = "页面已找不到该卡片，请刷新后重新点爱心";
+      renderUploadQueue();
+      return;
+    }
+    enqueueUploadJob(currentVideo, currentButton);
+  }
+
+  function ensureUploadQueue() {
+    let root = document.getElementById(QUEUE_ID);
+    if (root) return root;
+    root = document.createElement("section");
+    root.id = QUEUE_ID;
+    root.hidden = true;
+    const header = document.createElement("header");
+    header.className = "pixmax-jimeng-queue-header";
+    const title = document.createElement("span");
+    title.className = "pixmax-jimeng-queue-title";
+    title.textContent = "Pixmax 上传队列";
+    const summary = document.createElement("span");
+    summary.className = "pixmax-jimeng-queue-summary";
+    const count = document.createElement("span");
+    count.className = "pixmax-jimeng-queue-count";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "pixmax-jimeng-queue-toggle";
+    toggle.addEventListener("click", () => {
+      uploadQueueCollapsed = !uploadQueueCollapsed;
+      renderUploadQueue();
+    });
+    summary.append(count, toggle);
+    header.append(title, summary);
+    const list = document.createElement("div");
+    list.className = QUEUE_LIST_CLASS;
+    root.append(header, list);
+    document.documentElement.append(root);
+    return root;
+  }
+
+  function renderUploadQueue() {
+    const root = ensureUploadQueue();
+    const jobs = [...uploadJobs.values()].sort((first, second) => first.createdAt - second.createdAt);
+    root.hidden = jobs.length === 0;
+    root.dataset.collapsed = uploadQueueCollapsed ? "true" : "false";
+    document.documentElement.classList.toggle("pixmax-jimeng-queue-visible", jobs.length > 0);
+    root.querySelector(".pixmax-jimeng-queue-count").textContent = jobs.length
+      ? `${jobs.length} 个任务 · ${activeUploadCount} 个进行中`
+      : "";
+    const toggle = root.querySelector(".pixmax-jimeng-queue-toggle");
+    toggle.textContent = uploadQueueCollapsed ? "展开" : "收起";
+    toggle.title = uploadQueueCollapsed ? "展开上传队列" : "收起上传队列";
+    const list = root.querySelector(`.${QUEUE_LIST_CLASS}`);
+    list.textContent = "";
+    for (const job of jobs) list.append(renderUploadJob(job));
+  }
+
+  function renderUploadJob(job) {
+    const row = document.createElement("article");
+    row.className = "pixmax-jimeng-upload-job";
+    row.dataset.state = job.state;
+    const posterUrl = normalizeUrl(job.item?.poster);
+    let poster;
+    if (posterUrl) {
+      poster = document.createElement("img");
+      poster.className = "pixmax-jimeng-job-poster";
+      poster.src = posterUrl;
+      poster.alt = "";
+    } else {
+      poster = document.createElement("span");
+      poster.className = "pixmax-jimeng-job-poster-fallback";
+      poster.textContent = "▶";
+    }
+    const main = document.createElement("div");
+    main.className = "pixmax-jimeng-job-main";
+    const name = document.createElement("div");
+    name.className = "pixmax-jimeng-job-name";
+    name.textContent = job.item?.name || "即梦视频";
+    const status = document.createElement("div");
+    status.className = "pixmax-jimeng-job-status";
+    status.textContent = job.status || "等待上传";
+    status.title = job.error || job.status || "";
+    const progress = document.createElement("div");
+    progress.className = "pixmax-jimeng-job-progress";
+    const progressValue = document.createElement("span");
+    progressValue.style.setProperty("--pixmax-job-progress", `${Math.min(100, Math.max(4, Number(job.progress) || 4))}%`);
+    progress.append(progressValue);
+    main.append(name, status, progress);
+    const action = document.createElement("span");
+    if (job.state === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "pixmax-jimeng-job-retry";
+      retry.textContent = "重试";
+      retry.addEventListener("click", () => retryUploadJob(job.id));
+      action.append(retry);
+    }
+    row.append(poster, main, action);
+    return row;
   }
 
   function buildJimengLikeItem(video) {
@@ -587,10 +1034,11 @@
     const url = originalUrl;
     if (!url || !likeKey) throw new Error("这个即梦视频没有可收藏的公开链接。");
 
-    const record = findResultRecord(video);
-    const referenceImages = extractReferenceImages(record);
-    const promptContent = extractPromptContent(record, referenceImages);
-    const prompt = promptContentToText(promptContent) || extractPrompt(record);
+    const record = findMetadataRecord(video);
+    const promptElement = findPromptElementForVideo(video, record);
+    const referenceImages = extractReferenceImages(record, video, promptElement);
+    const promptContent = extractPromptContent(record, referenceImages, promptElement);
+    const prompt = promptContentToText(promptContent) || extractPrompt(record, promptElement);
     const labels = extractLabels(record);
     const poster = normalizeUrl(
       video.poster || findVideoCardHost(video)?.querySelector('img[class*="video-skeleton-img-"]')?.currentSrc || ""
@@ -1017,18 +1465,101 @@
     return ranked[0]?.score >= 70 ? ranked[0] : null;
   }
 
-  function extractPrompt(record) {
-    return String(findPromptElement(record)?.innerText || "").trim();
+  function extractPrompt(record, promptElement = null) {
+    return cleanJimengPromptText((promptElement || findPromptElement(record))?.innerText || "");
+  }
+
+  function findPromptElementForVideo(video, record) {
+    const localPrompt = findPromptElement(record);
+    if (cleanJimengPromptText(localPrompt?.innerText || "").length >= 20) return localPrompt;
+
+    const videoRect = video.getBoundingClientRect();
+    const videoCard = findVideoCardHost(video);
+    const candidates = new Set();
+    for (const element of document.querySelectorAll('[class*="prompt-"]')) candidates.add(element);
+    for (const image of document.querySelectorAll("img")) {
+      if (videoCard?.contains(image)) continue;
+      let node = image.parentElement;
+      for (let depth = 0; node && node !== document.body && depth < 7; depth += 1) {
+        if (node.querySelector("video")) break;
+        const text = cleanJimengPromptText(node.innerText || "");
+        if (text.length >= 20) candidates.add(node);
+        node = node.parentElement;
+      }
+    }
+
+    return [...candidates]
+      .map((element) => {
+        if (!element?.isConnected || element.querySelector("video")) return null;
+        const text = cleanJimengPromptText(element.innerText || "");
+        if (text.length < 20) return null;
+        const rect = element.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const horizontalGap = rect.right < videoRect.left
+          ? videoRect.left - rect.right
+          : rect.left > videoRect.right
+            ? rect.left - videoRect.right
+            : 0;
+        const verticalGap = rect.bottom < videoRect.top
+          ? videoRect.top - rect.bottom
+          : rect.top > videoRect.bottom
+            ? rect.top - videoRect.bottom
+            : 0;
+        const abovePenalty = rect.bottom < videoRect.top ? 350 : 0;
+        const inlineImageBonus = Math.min(12, element.querySelectorAll("img").length) * 18;
+        return {
+          element,
+          score: verticalGap * 2 + horizontalGap + abovePenalty - inlineImageBonus
+        };
+      })
+      .filter(Boolean)
+      .sort((first, second) => first.score - second.score)[0]?.element || null;
   }
 
   function findPromptElement(record) {
     if (!record) return null;
-    const candidates = [...record.querySelectorAll('[class^="prompt-"]')]
+    const allPromptElements = [...record.querySelectorAll('[class*="prompt-"]')];
+    const exactCandidates = allPromptElements
       .filter((element) => [...element.classList].some((name) => /^prompt-[A-Z0-9_]/.test(name)))
       .map((element) => ({ element, text: String(element.innerText || "").trim() }))
       .filter(({ text }) => text && !text.includes("Seedance") && text !== "详细信息")
       .sort((first, second) => first.text.length - second.text.length);
-    return candidates[0]?.element || null;
+    if (exactCandidates.length) return exactCandidates[0].element;
+
+    const classFallback = allPromptElements
+      .map((element) => ({
+        element,
+        imageCount: element.querySelectorAll("img").length,
+        text: String(element.innerText || "").trim()
+      }))
+      .filter(({ element, text }) => {
+        if (!text || text === "详细信息") return false;
+        return ![...element.classList].some((name) => /(?:header|label|title|button|toolbar)/i.test(name));
+      })
+      .sort((first, second) => second.imageCount - first.imageCount
+        || second.text.length - first.text.length)[0]?.element;
+    if (classFallback) return classFallback;
+
+    // Jimeng occasionally changes the generated class name on the prompt
+    // editor. A prompt with inline reference chips still has a stable shape:
+    // meaningful text (often mixed with the Seedance label), without a nested
+    // video. The current compact Jimeng layout can keep a details button in
+    // this same region, so a nested button is not a reason to reject it.
+    if (record.querySelectorAll("video").length > 2) return null;
+    return [...record.querySelectorAll("div,section,article,p,span")]
+      .map((element) => ({
+        element,
+        imageCount: element.querySelectorAll("img").length,
+        text: String(element.innerText || "").trim()
+      }))
+      .filter(({ element, imageCount, text }) =>
+        text.length >= 20
+        && !element.querySelector("video")
+        && !element.closest(`.${BUTTON_CLASS},.${EAGLE_BUTTON_CLASS},#${QUEUE_ID}`)
+        && (imageCount > 0 || !/^(?:重新编辑|再次生成|存\s*Eagle|详细信息)/.test(text))
+      )
+      .sort((first, second) => Number(second.imageCount > 0) - Number(first.imageCount > 0)
+        || first.text.length - second.text.length)[0]?.element || null;
   }
 
   function extractLabels(record) {
@@ -1039,11 +1570,18 @@
       .trim();
   }
 
-  function extractReferenceImages(record) {
+  function extractReferenceImages(record, video, promptElement = null) {
     const urls = [];
+    const videoCard = findVideoCardHost(video);
+    const promptScope = findPromptMediaScope(promptElement);
+    const metadataImages = [...(record?.querySelectorAll("img") || [])]
+      .filter((image) => !videoCard?.contains(image));
     const images = [
       ...(record?.querySelectorAll('[class*="reference-image-"] img') || []),
-      ...(findPromptElement(record)?.querySelectorAll("img") || [])
+      ...(record?.querySelectorAll('[class*="reference-"] img,[class*="material-"] img') || []),
+      ...(promptElement?.querySelectorAll("img") || []),
+      ...(promptScope?.querySelectorAll("img") || []),
+      ...metadataImages
     ];
     for (const image of images) {
       const url = normalizeUrl(image.currentSrc || image.src);
@@ -1052,8 +1590,20 @@
     return urls.map((url, index) => ({ name: `参考图 ${index + 1}`, url }));
   }
 
-  function extractPromptContent(record, referenceImages) {
-    const prompt = findPromptElement(record);
+  function findPromptMediaScope(promptElement) {
+    let node = promptElement;
+    let scope = promptElement;
+    for (let depth = 0; node && node !== document.body && depth < 5; depth += 1) {
+      if (node.querySelector("video")) break;
+      const text = cleanJimengPromptText(node.innerText || "");
+      if (text.length >= 20) scope = node;
+      node = node.parentElement;
+    }
+    return scope;
+  }
+
+  function extractPromptContent(record, referenceImages, promptElement = null) {
+    const prompt = promptElement || findPromptElement(record);
     if (!prompt) return [];
     const segments = [];
 
@@ -1092,6 +1642,15 @@
     };
 
     for (const child of prompt.childNodes) visit(child);
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      if (segment.type !== "text") continue;
+      const markerIndex = String(segment.text || "").search(/\s*即梦\s+Seedance\b/i);
+      if (markerIndex < 0) continue;
+      segment.text = segment.text.slice(0, markerIndex);
+      segments.splice(index + 1);
+      break;
+    }
     const firstText = segments.find((segment) => segment.type === "text");
     const lastText = [...segments].reverse().find((segment) => segment.type === "text");
     if (firstText) firstText.text = firstText.text.replace(/^\s+/, "");
@@ -1100,10 +1659,17 @@
   }
 
   function promptContentToText(promptContent) {
-    return promptContent.map((segment) => segment.type === "image"
+    return cleanJimengPromptText(promptContent.map((segment) => segment.type === "image"
       ? `@${segment.name || "参考图"}`
       : segment.text || ""
-    ).join("").trim();
+    ).join(""));
+  }
+
+  function cleanJimengPromptText(value) {
+    return String(value || "")
+      .replace(/\s*即梦\s+Seedance\b[\s\S]*$/i, "")
+      .replace(/\s*详细信息\s*$/i, "")
+      .trim();
   }
 
   function getJimengLikeKey(value) {
@@ -1170,11 +1736,27 @@
 
   function sendRuntimeMessage(message) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) reject(new Error(runtimeError.message));
-        else resolve(response);
-      });
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError) reject(normalizeRuntimeMessageError(runtimeError));
+          else resolve(response);
+        });
+      } catch (error) {
+        reject(normalizeRuntimeMessageError(error));
+      }
     });
+  }
+
+  function normalizeRuntimeMessageError(error) {
+    const message = String(error?.message || error || "扩展通信失败。");
+    if (!/Extension context invalidated/i.test(message)) return new Error(message);
+    const reloadKey = "pixmaxHubInvalidatedReloadAt";
+    const previousReload = Number(sessionStorage.getItem(reloadKey) || 0);
+    if (Date.now() - previousReload > 5000) {
+      sessionStorage.setItem(reloadKey, String(Date.now()));
+      window.setTimeout(() => location.reload(), 120);
+    }
+    return new Error("扩展刚刚重载，即梦页面的旧脚本已失效，正在自动刷新页面后恢复。");
   }
 })();

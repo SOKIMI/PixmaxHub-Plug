@@ -11,7 +11,8 @@ const MESSAGE = {
   OPEN_REVIEW_BOARD: "pixmax-cloner:open-review-board",
   GET_EXTERNAL_LIKE_STATE: "pixmax-cloner:get-external-like-state",
   REFRESH_EXTERNAL_LIKED_ITEMS: "pixmax-cloner:refresh-external-liked-items",
-  TOGGLE_EXTERNAL_LIKE: "pixmax-cloner:toggle-external-like"
+  TOGGLE_EXTERNAL_LIKE: "pixmax-cloner:toggle-external-like",
+  UPLOAD_PROGRESS: "pixmax-cloner:jimeng-upload-progress"
 };
 
 const LIKES_STORAGE_KEY = "pixmaxLikedItems";
@@ -23,6 +24,12 @@ const PIXMAX_API_ORIGIN = "https://app.pixmax.cn";
 const SHARED_LIKES_MARKER = "PIXMAX_CANVAS_CLONER_LIKES_V1";
 const CANVAS_REVISION_CONFLICT = "Canvas.Revision.Conflict";
 const DEFAULT_LIKE_COLOR = "#ff3864";
+const PIXMAX_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const PIXMAX_UPLOAD_POLL_INTERVAL_MS = 3000;
+const PIXMAX_UPLOAD_POLL_LIMIT = 20;
+const JIMENG_ARCHIVE_WORKSPACE_UUID = "3bba9785-24d6-4b1f-84c1-895d85db4bbe";
+const JIMENG_ARCHIVE_FILE_UUID = "1f17948c-7f24-6472-8b47-2979ca759811";
+const JIMENG_ARCHIVE_CANVAS_URL = `${PIXMAX_API_ORIGIN}/workspace/${JIMENG_ARCHIVE_WORKSPACE_UUID}?file=${JIMENG_ARCHIVE_FILE_UUID}`;
 const SHARED_LIKE_OPTIONS_DEFAULTS = {
   sharedLikesEnabled: true,
   sharedLikesFileUuid: "",
@@ -38,6 +45,8 @@ const DEFAULT_OPTIONS = {
 
 const jimengProtocolCaptures = new Map();
 const jimengFullTraces = new Map();
+const jimengPixmaxUploadJobs = new Map();
+const pixmaxCanvasMutationLocks = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return false;
@@ -106,9 +115,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === MESSAGE.TOGGLE_EXTERNAL_LIKE) {
-    toggleExternalLike(message.item)
-      .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((error) => sendResponse({ ok: false, error: friendlyExternalError(error) }));
+    const reportProgress = createJimengUploadProgressReporter(sender, message);
+    toggleExternalLike(message.item, reportProgress)
+      .then((result) => {
+        if (result.liked) reportProgress("success", 100, "已上传 Pixmax 并写入 Review Board");
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        reportProgress("failed", 100, friendlyExternalError(error));
+        sendResponse({ ok: false, error: friendlyExternalError(error) });
+      });
     return true;
   }
 
@@ -121,6 +137,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+
+function createJimengUploadProgressReporter(sender, message) {
+  const tabId = Number(sender?.tab?.id);
+  const jobId = String(message?.jobId || message?.item?.likeKey || "").trim();
+  if (!Number.isInteger(tabId) || tabId < 0 || !jobId) return () => {};
+  let lastSignature = "";
+  return (state, progress, status) => {
+    const payload = {
+      type: MESSAGE.UPLOAD_PROGRESS,
+      jobId,
+      likeKey: String(message?.item?.likeKey || jobId),
+      progress: Math.min(100, Math.max(0, Math.round(Number(progress) || 0))),
+      state: String(state || "uploading"),
+      status: String(status || "")
+    };
+    const signature = JSON.stringify([payload.state, payload.progress, payload.status]);
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    chrome.tabs.sendMessage(tabId, payload, () => void chrome.runtime.lastError);
+  };
+}
 
 const JIMENG_TRACE_DURATION_MS = 24000;
 const JIMENG_TRACE_SETTLE_MS = 4500;
@@ -739,13 +776,17 @@ async function importUrlToEagle(item) {
     : "https://app.pixmax.cn/";
   const isJimengItem = /^https:\/\/jimeng\.jianying\.com\//i.test(website)
     || String(item?.source || "").toLowerCase() === "jimeng";
+  const isPixmaxArchivedJimeng = Boolean(
+    isJimengItem
+    && (item?.storageProvider === "pixmax" || item?.pixmaxAssetUuid)
+  );
   const url = normalizeAssetUrl(isJimengItem ? item?.originalUrl : item?.url);
   if (!url) {
     throw new Error(isJimengItem
       ? "没有取得即梦原生下载操作返回的原片 URL，已阻止把预览视频存入 Eagle。"
       : "当前节点没有可导入 Eagle 的素材链接。");
   }
-  if (isJimengItem && (
+  if (isJimengItem && !isPixmaxArchivedJimeng && (
     item?.originalVerified !== true
     || !isVerifiedJimengOriginalUrl(url, normalizeAssetUrl(item?.previewUrl))
   )) {
@@ -753,11 +794,11 @@ async function importUrlToEagle(item) {
   }
 
   const name = buildEagleItemName(item, url);
-  const referer = isJimengItem
+  const referer = isJimengItem && !isPixmaxArchivedJimeng
     ? website
     : "https://app.pixmax.cn/";
   const eagleItem = {
-    annotation: String(item?.annotation || "").trim(),
+    annotation: buildEagleAnnotation(item),
     folderId: options.eagleFolderId,
     name,
     website
@@ -778,6 +819,23 @@ async function importUrlToEagle(item) {
     name,
     result
   };
+}
+
+function buildEagleAnnotation(item) {
+  const prompt = String(item?.annotation || "").trim();
+  const referenceLines = (Array.isArray(item?.referenceImages) ? item.referenceImages : [])
+    .map((image, index) => {
+      const url = normalizeAssetUrl(image?.url);
+      if (!url) return "";
+      const name = String(image?.name || `参考图 ${index + 1}`).trim();
+      return `${index + 1}. ${name}：${url}`;
+    })
+    .filter(Boolean);
+  if (!referenceLines.length) return prompt;
+  return [prompt, `参考图片链接：\n${referenceLines.join("\n")}`]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 12000);
 }
 
 function isVerifiedJimengOriginalUrl(originalUrl, previewUrl) {
@@ -938,6 +996,9 @@ async function getExternalLikeState(rawKeys) {
   validateJimengCanvasOptions(options);
   const canvas = await fetchPixmaxCanvas(options.sharedLikesFileUuid);
   const items = getSharedOwnerItems(canvas, options.sharedLikesOwnerName);
+  withPixmaxCanvasMutationLock(JIMENG_ARCHIVE_FILE_UUID, () =>
+    repairJimengArchiveNodesFromLikes(items, 4)
+  ).catch(() => {});
 
   return {
     color: normalizeLikeColor(options.sharedLikesColor),
@@ -947,11 +1008,25 @@ async function getExternalLikeState(rawKeys) {
   };
 }
 
-async function toggleExternalLike(rawItem) {
+async function toggleExternalLike(rawItem, reportProgress = () => {}) {
   const item = normalizeExternalLikeItem(rawItem);
   const options = await getStoredSharedLikeOptions();
   validateJimengCanvasOptions(options);
-  return toggleSharedExternalLike(item, options);
+  reportProgress("preparing", 28, "正在检查 Pixmax Review Board");
+  return withPixmaxCanvasMutationLock(options.sharedLikesFileUuid, () =>
+    toggleSharedExternalLike(item, options, 4, null, reportProgress)
+  );
+}
+
+function withPixmaxCanvasMutationLock(fileUuid, task) {
+  const key = String(fileUuid || "").trim();
+  if (!key) return Promise.resolve().then(task);
+  const previous = pixmaxCanvasMutationLocks.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(task);
+  pixmaxCanvasMutationLocks.set(key, current);
+  return current.finally(() => {
+    if (pixmaxCanvasMutationLocks.get(key) === current) pixmaxCanvasMutationLocks.delete(key);
+  });
 }
 
 async function refreshExternalLikedItems(rawItems) {
@@ -961,7 +1036,9 @@ async function refreshExternalLikedItems(rawItems) {
   if (!items.length) return { updated: 0 };
   const options = await getStoredSharedLikeOptions();
   validateJimengCanvasOptions(options);
-  return refreshSharedExternalLikedItems(items, options);
+  return withPixmaxCanvasMutationLock(options.sharedLikesFileUuid, () =>
+    refreshSharedExternalLikedItems(items, options, 4)
+  );
 }
 
 async function refreshSharedExternalLikedItems(freshItems, options, retryCount = 1) {
@@ -980,6 +1057,14 @@ async function refreshSharedExternalLikedItems(freshItems, options, retryCount =
     const existingIndex = items.findIndex((candidate) => getLikeKey(candidate) === targetKey);
     if (existingIndex < 0) continue;
     const current = items[existingIndex];
+    const hasPixmaxArchive = Boolean(current.pixmaxAssetUuid || current.storageProvider === "pixmax");
+    const hasVerifiedFreshOriginal = Boolean(
+      freshItem.originalVerified === true
+      && isVerifiedJimengOriginalUrl(
+        normalizeAssetUrl(freshItem.originalUrl || freshItem.url),
+        normalizeAssetUrl(freshItem.previewUrl)
+      )
+    );
     const next = {
       ...current,
       ...freshItem,
@@ -996,6 +1081,32 @@ async function refreshSharedExternalLikedItems(freshItems, options, retryCount =
       videoHeight: freshItem.videoHeight || current.videoHeight || 0,
       videoWidth: freshItem.videoWidth || current.videoWidth || 0
     };
+    if (!hasPixmaxArchive && !hasVerifiedFreshOriginal) {
+      next.linkMayExpire = current.linkMayExpire;
+      next.originalUrl = current.originalUrl || current.url || "";
+      next.originalVerified = current.originalVerified === true;
+      next.sourceUrlIssuedAt = current.sourceUrlIssuedAt || "";
+      next.url = current.url || current.originalUrl || "";
+    }
+    if (hasPixmaxArchive) {
+      next.archiveCode = current.archiveCode || "";
+      next.assetUuid = current.assetUuid || current.pixmaxAssetUuid || "";
+      next.fileUuid = current.fileUuid || JIMENG_ARCHIVE_FILE_UUID;
+      next.linkMayExpire = false;
+      next.name = freshItem.name !== "即梦视频"
+        ? freshItem.name
+        : current.name || freshItem.name;
+      next.nodeId = current.nodeId || "";
+      next.originalUrl = current.originalUrl || current.pixmaxUrl || current.url || "";
+      next.pixmaxAssetUuid = current.pixmaxAssetUuid || current.assetUuid || "";
+      next.pixmaxAssetName = current.pixmaxAssetName || current.name || "";
+      next.pixmaxCanvasUrl = current.pixmaxCanvasUrl || JIMENG_ARCHIVE_CANVAS_URL;
+      next.pixmaxPreviewUrl = current.pixmaxPreviewUrl || "";
+      next.pixmaxUrl = current.pixmaxUrl || current.originalUrl || current.url || "";
+      next.sourceUrlIssuedAt = "";
+      next.storageProvider = "pixmax";
+      next.url = current.url || current.pixmaxUrl || current.originalUrl || "";
+    }
     if (JSON.stringify(current) === JSON.stringify(next)) continue;
     items[existingIndex] = next;
     updated += 1;
@@ -1031,7 +1142,13 @@ async function refreshSharedExternalLikedItems(freshItems, options, retryCount =
   return { updated, shared: true, storageTarget: "pixmax-canvas" };
 }
 
-async function toggleSharedExternalLike(item, options, retryCount = 1) {
+async function toggleSharedExternalLike(
+  item,
+  options,
+  retryCount = 1,
+  desiredLiked = null,
+  reportProgress = () => {}
+) {
   const canvas = await fetchPixmaxCanvas(options.sharedLikesFileUuid);
   const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], options.sharedLikesOwnerName);
   if (!ownerNode) {
@@ -1043,20 +1160,54 @@ async function toggleSharedExternalLike(item, options, retryCount = 1) {
   const items = parsed?.items ? [...parsed.items] : [];
   const targetKey = getLikeKey(item);
   const existingIndex = items.findIndex((candidate) => getLikeKey(candidate) === targetKey);
-  let liked;
-  if (existingIndex >= 0) {
+  const existingItem = existingIndex >= 0 ? items[existingIndex] : null;
+  const existingNeedsPixmaxArchive = Boolean(
+    existingItem
+    && (existingItem.source === "jimeng" || String(existingItem.likeKey || "").startsWith("jimeng:"))
+    && !existingItem.pixmaxAssetUuid
+    && existingItem.storageProvider !== "pixmax"
+  );
+  const shouldLike = desiredLiked === null
+    ? existingIndex < 0 || existingNeedsPixmaxArchive
+    : desiredLiked;
+  const shouldReplaceLegacyArchive = Boolean(
+    shouldLike
+    && existingItem
+    && existingNeedsPixmaxArchive
+    && (desiredLiked === null || item.pixmaxAssetUuid)
+  );
+  if (shouldLike && existingIndex >= 0 && !shouldReplaceLegacyArchive) {
+    return { color, liked: true, shared: true, storageTarget: "pixmax-canvas" };
+  }
+  if (!shouldLike && existingIndex < 0) {
+    return { color, liked: false, shared: true, storageTarget: "pixmax-canvas" };
+  }
+
+  const liked = shouldLike;
+  if (!shouldLike) {
     items.splice(existingIndex, 1);
-    liked = false;
+  } else if (shouldReplaceLegacyArchive) {
+    item = item.pixmaxAssetUuid
+      ? item
+      : await archiveJimengLikeInPixmax(existingItem, reportProgress);
+    items.splice(existingIndex, 1, {
+      ...existingItem,
+      ...item,
+      likedAt: existingItem.likedAt || new Date().toISOString(),
+      likedBy: options.sharedLikesOwnerName,
+      likedByColor: color
+    });
   } else {
+    item = await archiveJimengLikeInPixmax(item, reportProgress);
     items.unshift({
       ...item,
       likedAt: new Date().toISOString(),
       likedBy: options.sharedLikesOwnerName,
       likedByColor: color
     });
-    liked = true;
   }
 
+  if (liked) reportProgress("saving", 94, "正在写入 Pixmax Review Board");
   const result = await pixmaxApiPost("/canvas/node/batch", {
     fileUuid: options.sharedLikesFileUuid,
     baseRevision: canvas.revision,
@@ -1078,7 +1229,7 @@ async function toggleSharedExternalLike(item, options, retryCount = 1) {
 
   if (!result.success) {
     if (result.errCode === CANVAS_REVISION_CONFLICT && retryCount > 0) {
-      return toggleSharedExternalLike(item, options, retryCount - 1);
+      return toggleSharedExternalLike(item, options, retryCount - 1, shouldLike, reportProgress);
     }
     throw new Error(result.errMessage || result.errCode || "共享收藏写入失败。");
   }
@@ -1111,6 +1262,705 @@ async function pixmaxApiPost(path, body) {
     throw new Error(result.errMessage || result.errCode || `Pixmax API 请求失败：HTTP ${response.status}`);
   }
   return result;
+}
+
+async function archiveJimengLikeInPixmax(item, reportProgress = () => {}) {
+  if (item?.source !== "jimeng") return item;
+  if (item.pixmaxAssetUuid && normalizeAssetUrl(item.pixmaxUrl || item.url)) return item;
+
+  const sourceUrl = normalizeAssetUrl(item.originalUrl || item.url);
+  if (
+    !sourceUrl
+    || item.originalVerified !== true
+    || !isVerifiedJimengOriginalUrl(sourceUrl, normalizeAssetUrl(item.previewUrl))
+  ) {
+    throw new Error("即梦原片没有通过官方协议校验，已停止上传 Pixmax，且不会保存预览小样。");
+  }
+
+  const archiveCode = normalizeJimengArchiveCode(item.archiveCode) || buildJimengArchiveCode();
+  const archiveItem = { ...item, archiveCode };
+  const jobKey = String(item.likeKey || sourceUrl);
+  let job = jimengPixmaxUploadJobs.get(jobKey);
+  if (!job) {
+    job = ensureJimengOriginalInPixmaxCanvas(archiveItem, sourceUrl, reportProgress)
+      .finally(() => jimengPixmaxUploadJobs.delete(jobKey));
+    jimengPixmaxUploadJobs.set(jobKey, job);
+  } else {
+    reportProgress("queued", 32, "相同原片正在上传，等待现有任务完成");
+  }
+  const asset = await job;
+  return {
+    ...archiveItem,
+    archiveCode: asset.archiveCode || archiveCode,
+    assetUuid: asset.assetUuid,
+    linkMayExpire: false,
+    fileUuid: asset.fileUuid,
+    nodeId: asset.nodeId,
+    // Review Board keeps Jimeng's original title/prompt/reference structure.
+    // The coded filename is stored separately and is used by the Pixmax asset.
+    name: archiveItem.name,
+    originalUrl: asset.url,
+    pixmaxAssetUuid: asset.assetUuid,
+    pixmaxCanvasUrl: asset.canvasUrl,
+    pixmaxPreviewUrl: asset.previewUrl,
+    pixmaxAssetName: asset.displayName || buildJimengArchiveDisplayName(archiveItem, archiveCode),
+    pixmaxUrl: asset.url,
+    sourceUrlIssuedAt: "",
+    storageProvider: "pixmax",
+    url: asset.url
+  };
+}
+
+async function ensureJimengOriginalInPixmaxCanvas(item, sourceUrl, reportProgress = () => {}) {
+  reportProgress("preparing", 32, "正在读取 Pixmax 归档画布");
+  const canvas = await fetchPixmaxCanvas(JIMENG_ARCHIVE_FILE_UUID);
+  let existingNode = findJimengArchiveNode(canvas.nodes ?? [], item.likeKey);
+  if (existingNode) {
+    existingNode = await updateJimengArchiveNodeMetadata(canvas, existingNode, item);
+    const existingMetaData = parsePixmaxNodeMetaData(existingNode);
+    const existingArchiveCode = normalizeJimengArchiveCode(existingMetaData?.data?.archiveCode)
+      || normalizeJimengArchiveCode(item.archiveCode)
+      || buildJimengArchiveCode();
+    const existingDisplayName = String(existingMetaData?.data?.label || "").trim()
+      || buildJimengArchiveDisplayName(item, existingArchiveCode);
+    const existingAsset = normalizePixmaxUploadAsset(existingNode.defaultAsset || {
+      assetUuid: existingNode.defaultAssetUuid
+    });
+    if (existingAsset.assetUuid) {
+      const refreshed = await refreshPixmaxAssetLink(existingAsset);
+      const existingUrl = resolvePixmaxAssetUrl(refreshed);
+      if (existingUrl) {
+        reportProgress("saving", 90, "已找到 Pixmax 原片，正在更新 Review Board");
+        return {
+          ...refreshed,
+          archiveCode: existingArchiveCode,
+          assetUuid: existingAsset.assetUuid,
+          canvasUrl: JIMENG_ARCHIVE_CANVAS_URL,
+          displayName: existingDisplayName,
+          fileUuid: JIMENG_ARCHIVE_FILE_UUID,
+          nodeId: String(existingNode.uuid || ""),
+          previewUrl: resolvePixmaxAssetPreviewUrl(refreshed),
+          url: existingUrl
+        };
+      }
+    }
+  }
+
+  const uploadedAsset = await uploadJimengOriginalToPixmax(item, sourceUrl, reportProgress);
+  reportProgress("processing", 84, "Pixmax 已接收原片，正在创建画布节点");
+  const [asset, node] = await Promise.all([
+    refreshPixmaxAssetLink(uploadedAsset),
+    withPixmaxCanvasMutationLock(JIMENG_ARCHIVE_FILE_UUID, () =>
+      createJimengArchiveVideoNode(item, uploadedAsset, 4)
+    )
+  ]);
+  const url = resolvePixmaxAssetUrl(asset);
+  if (!url) throw new Error("Pixmax 资产已创建，但没有返回可播放链接，已停止写入 Review Board。");
+  const archiveCode = normalizeJimengArchiveCode(item.archiveCode) || buildJimengArchiveCode();
+  const displayName = buildJimengArchiveDisplayName(item, archiveCode);
+  return {
+    ...asset,
+    archiveCode,
+    canvasUrl: JIMENG_ARCHIVE_CANVAS_URL,
+    displayName,
+    fileUuid: JIMENG_ARCHIVE_FILE_UUID,
+    nodeId: node.uuid,
+    previewUrl: resolvePixmaxAssetPreviewUrl(asset),
+    url
+  };
+}
+
+async function uploadJimengOriginalToPixmax(item, sourceUrl, reportProgress = () => {}) {
+  reportProgress("downloading", 36, "正在读取即梦官方原片");
+  let sourceResponse;
+  try {
+    sourceResponse = await fetch(sourceUrl, {
+      cache: "no-store",
+      credentials: "omit",
+      referrer: normalizeAssetUrl(item.website) || "https://jimeng.jianying.com/",
+      referrerPolicy: "strict-origin-when-cross-origin"
+    });
+  } catch (error) {
+    throw new Error(`读取即梦原片失败：${error?.message || String(error)}`);
+  }
+  if (!sourceResponse.ok) {
+    throw new Error(`读取即梦原片失败：HTTP ${sourceResponse.status}。请在即梦页面重试爱心以刷新原片地址。`);
+  }
+
+  const responseType = String(sourceResponse.headers.get("content-type") || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (/^(?:text\/|application\/(?:json|xml|xhtml\+xml))/.test(responseType)) {
+    throw new Error(`即梦原片返回了错误内容（${responseType}），已停止上传 Pixmax。`);
+  }
+  const contentType = responseType.startsWith("video/") ? responseType : "video/mp4";
+  const fileName = buildPixmaxVideoFileName(item.name, sourceUrl, contentType, item.archiveCode);
+  const declaredSize = Number(sourceResponse.headers.get("content-length") || 0);
+  if (declaredSize > PIXMAX_UPLOAD_MAX_BYTES) {
+    sourceResponse.body?.cancel?.().catch(() => {});
+    throw new Error(`即梦原片大小为 ${formatBytes(declaredSize)}，超过 Pixmax 单文件 100 MB 限制。`);
+  }
+  if (declaredSize > 0 && sourceResponse.body?.tee) {
+    reportProgress("authorizing", 44, `正在获取 Pixmax 上传授权 · ${formatBytes(declaredSize)}`);
+    const authorize = await requestPixmaxUploadAuthorization(fileName, declaredSize, contentType);
+    validatePixmaxUploadAuthorization(authorize);
+    const [uploadStream, fallbackStream] = sourceResponse.body.tee();
+    let uploadResult;
+    try {
+      // Stream Jimeng -> Pixmax directly. This overlaps the source download and
+      // OSS upload instead of waiting for the whole video to be buffered first.
+      const progressStream = monitorReadableStreamProgress(
+        uploadStream,
+        declaredSize,
+        (loaded, total) => reportProgress(
+          "uploading",
+          48 + Math.round((loaded / total) * 30),
+          `正在传入 Pixmax · ${formatBytes(loaded)} / ${formatBytes(total)}`
+        )
+      );
+      uploadResult = await putPixmaxOssObject(progressStream, authorize.data, contentType, true);
+      void fallbackStream.cancel().catch(() => {});
+    } catch (streamError) {
+      // Some OSS regions/proxies may reject chunked request bodies. Keep a
+      // byte-for-byte fallback so those accounts still use the proven Blob path.
+      await uploadStream.cancel(streamError).catch(() => {});
+      reportProgress("downloading", 50, "流式传输不可用，正在缓冲原片后重试");
+      const sourceBlob = await new Response(fallbackStream, {
+        headers: { "Content-Type": contentType }
+      }).blob();
+      validateJimengSourceBlob(sourceBlob);
+      let fallbackAuthorize = authorize;
+      if (sourceBlob.size !== declaredSize) {
+        fallbackAuthorize = await requestPixmaxUploadAuthorization(fileName, sourceBlob.size, contentType);
+        validatePixmaxUploadAuthorization(fallbackAuthorize);
+      }
+      reportProgress("uploading", 62, `正在重试上传 Pixmax · ${formatBytes(sourceBlob.size)}`);
+      uploadResult = await putPixmaxOssObject(sourceBlob, fallbackAuthorize.data, contentType);
+      reportProgress("processing", 80, "Pixmax 已接收原片，正在处理视频");
+      return finalizePixmaxUploadAsset(uploadResult, fallbackAuthorize.data);
+    }
+    reportProgress("processing", 80, "Pixmax 已接收原片，正在处理视频");
+    return finalizePixmaxUploadAsset(uploadResult, authorize.data);
+  }
+
+  reportProgress("downloading", 42, "正在缓冲即梦原片");
+  const sourceBlob = await sourceResponse.blob();
+  validateJimengSourceBlob(sourceBlob);
+  reportProgress("authorizing", 48, `正在获取 Pixmax 上传授权 · ${formatBytes(sourceBlob.size)}`);
+  const authorize = await requestPixmaxUploadAuthorization(fileName, sourceBlob.size, contentType);
+  validatePixmaxUploadAuthorization(authorize);
+  reportProgress("uploading", 58, `正在上传 Pixmax · ${formatBytes(sourceBlob.size)}`);
+  const uploadResult = await putPixmaxOssObject(sourceBlob, authorize.data, contentType);
+  reportProgress("processing", 80, "Pixmax 已接收原片，正在处理视频");
+  return finalizePixmaxUploadAsset(uploadResult, authorize.data);
+}
+
+function monitorReadableStreamProgress(stream, totalBytes, onProgress) {
+  if (!stream?.getReader || !(totalBytes > 0)) return stream;
+  const reader = stream.getReader();
+  let loadedBytes = 0;
+  let lastReportedAt = 0;
+  return new ReadableStream({
+    async pull(controller) {
+      const result = await reader.read();
+      if (result.done) {
+        onProgress(totalBytes, totalBytes);
+        controller.close();
+        return;
+      }
+      const chunk = result.value;
+      loadedBytes += Number(chunk?.byteLength || chunk?.length || 0);
+      const now = Date.now();
+      if (now - lastReportedAt >= 220 || loadedBytes >= totalBytes) {
+        lastReportedAt = now;
+        onProgress(Math.min(loadedBytes, totalBytes), totalBytes);
+      }
+      controller.enqueue(chunk);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    }
+  });
+}
+
+function validateJimengSourceBlob(sourceBlob) {
+  if (!sourceBlob.size) throw new Error("即梦返回的原片为空，已停止上传 Pixmax。");
+  if (sourceBlob.size > PIXMAX_UPLOAD_MAX_BYTES) {
+    throw new Error(`即梦原片大小为 ${formatBytes(sourceBlob.size)}，超过 Pixmax 单文件 100 MB 限制。`);
+  }
+}
+
+function validatePixmaxUploadAuthorization(authorize) {
+  if (!authorize.success || !authorize.data) {
+    throw new Error(authorize.errMessage || authorize.errCode || "Pixmax 没有返回上传授权，请确认 Pixmax 已登录。");
+  }
+}
+
+async function finalizePixmaxUploadAsset(uploadResult, authorization) {
+  let asset = normalizePixmaxUploadAsset(uploadResult, authorization);
+  if (!asset.assetUuid && authorization.sessionId) {
+    asset = await pollPixmaxUploadAsset(authorization.sessionId, authorization);
+  }
+  if (!asset.assetUuid) throw new Error("Pixmax 已接收视频，但没有返回 assetUuid，已停止写入 Review Board。");
+
+  return {
+    ...asset,
+    assetUuid: asset.assetUuid
+  };
+}
+
+function requestPixmaxUploadAuthorization(fileName, fileSize, contentType) {
+  return pixmaxApiPost("/assets/oss/authorize", {
+    fileName,
+    fileSize,
+    contentType
+  });
+}
+
+async function refreshPixmaxAssetLink(asset, authorization = {}) {
+  if (!asset?.assetUuid) return asset;
+  const linkResult = await pixmaxApiPost("/assets/getAssetsLink", {
+    assetUuids: [asset.assetUuid]
+  });
+  if (!linkResult.success || !Array.isArray(linkResult.data) || !linkResult.data.length) return asset;
+  const linked = linkResult.data.find((candidate) =>
+    String(candidate?.assetsUuid || candidate?.assetUuid || "") === asset.assetUuid
+  ) || linkResult.data[0];
+  return normalizePixmaxUploadAsset(linked, authorization, asset);
+}
+
+async function createJimengArchiveVideoNode(item, asset, retryCount = 4, initialCanvas = null) {
+  const canvas = initialCanvas || await fetchPixmaxCanvas(JIMENG_ARCHIVE_FILE_UUID);
+  const existingNode = findJimengArchiveNode(canvas.nodes ?? [], item.likeKey);
+  if (existingNode) return existingNode;
+
+  const position = getJimengArchiveNodePosition(canvas.nodes ?? []);
+  const size = getJimengArchiveNodeSize(asset, item);
+  const archiveCode = normalizeJimengArchiveCode(item.archiveCode) || buildJimengArchiveCode();
+  const displayName = buildJimengArchiveDisplayName(item, archiveCode);
+  const node = {
+    uuid: crypto.randomUUID(),
+    type: "BASE_VIDEO",
+    defaultAssetUuid: asset.assetUuid,
+    metaData: JSON.stringify({
+      data: {
+        annotation: String(item.annotation || "").slice(0, 12000),
+        archiveCode,
+        description: String(item.annotation || "").slice(0, 12000),
+        label: displayName,
+        pixmaxHubLikeKey: String(item.likeKey || "").slice(0, 1200),
+        pixmaxHubSource: "jimeng",
+        prompt: String(item.annotation || "").slice(0, 12000),
+        promptContent: Array.isArray(item.promptContent) ? item.promptContent.slice(0, 200) : [],
+        referenceImages: Array.isArray(item.referenceImages) ? item.referenceImages.slice(0, 20) : [],
+        sourceUrl: String(item.website || "").slice(0, 2000)
+      },
+      position,
+      measured: size,
+      width: size.width,
+      height: size.height
+    })
+  };
+  const result = await pixmaxApiPost("/canvas/node/batch", {
+    fileUuid: JIMENG_ARCHIVE_FILE_UUID,
+    baseRevision: canvas.revision,
+    create: [node],
+    update: [],
+    delete: []
+  });
+  if (!result.success) {
+    if (result.errCode === CANVAS_REVISION_CONFLICT && retryCount > 0) {
+      return createJimengArchiveVideoNode(item, asset, retryCount - 1);
+    }
+    throw new Error(result.errMessage || result.errCode || "视频已上传 Pixmax，但写入指定画布失败。");
+  }
+  return node;
+}
+
+async function updateJimengArchiveNodeMetadata(canvas, node, item, retryCount = 1) {
+  const nextMetaData = buildJimengArchiveNodeMetaData(node, item);
+  if (nextMetaData === String(node.metaData || "")) return node;
+
+  const result = await pixmaxApiPost("/canvas/node/batch", {
+    fileUuid: JIMENG_ARCHIVE_FILE_UUID,
+    baseRevision: canvas.revision,
+    create: [],
+    update: [{ uuid: node.uuid, metaData: nextMetaData }],
+    delete: []
+  });
+  if (!result.success) {
+    if (result.errCode === CANVAS_REVISION_CONFLICT && retryCount > 0) {
+      const nextCanvas = await fetchPixmaxCanvas(JIMENG_ARCHIVE_FILE_UUID);
+      const nextNode = findJimengArchiveNode(nextCanvas.nodes ?? [], item.likeKey);
+      if (!nextNode) throw new Error("Pixmax 归档节点在更新提示词时消失，请重试。");
+      return updateJimengArchiveNodeMetadata(nextCanvas, nextNode, item, retryCount - 1);
+    }
+    throw new Error(result.errMessage || result.errCode || "无法给 Pixmax 归档节点补充提示词和命名代码。");
+  }
+  return { ...node, metaData: nextMetaData };
+}
+
+function buildJimengArchiveNodeMetaData(node, item) {
+  const previous = parsePixmaxNodeMetaData(node);
+  const archiveCode = normalizeJimengArchiveCode(previous?.data?.archiveCode)
+    || normalizeJimengArchiveCode(item.archiveCode)
+    || buildJimengArchiveCode();
+  const next = {
+    ...previous,
+    data: {
+      ...(previous.data || {}),
+      annotation: String(item.annotation || previous?.data?.annotation || "").slice(0, 12000),
+      archiveCode,
+      description: String(item.annotation || previous?.data?.description || "").slice(0, 12000),
+      label: buildJimengArchiveDisplayName(item, archiveCode),
+      pixmaxHubLikeKey: String(item.likeKey || previous?.data?.pixmaxHubLikeKey || "").slice(0, 1200),
+      pixmaxHubSource: "jimeng",
+      prompt: String(item.annotation || previous?.data?.prompt || "").slice(0, 12000),
+      promptContent: Array.isArray(item.promptContent) && item.promptContent.length
+        ? item.promptContent.slice(0, 200)
+        : previous?.data?.promptContent || [],
+      referenceImages: Array.isArray(item.referenceImages) && item.referenceImages.length
+        ? item.referenceImages.slice(0, 20)
+        : previous?.data?.referenceImages || [],
+      sourceUrl: String(item.website || previous?.data?.sourceUrl || "").slice(0, 2000)
+    }
+  };
+  return JSON.stringify(next);
+}
+
+async function repairJimengArchiveNodesFromLikes(items, retryCount = 1) {
+  const candidates = (items || []).filter((item) =>
+    (item?.storageProvider === "pixmax" || item?.pixmaxAssetUuid)
+    && (item?.nodeId || item?.likeKey)
+  );
+  if (!candidates.length) return { updated: 0 };
+  const canvas = await fetchPixmaxCanvas(JIMENG_ARCHIVE_FILE_UUID);
+  const updates = [];
+  for (const item of candidates) {
+    const node = (canvas.nodes || []).find((candidate) => candidate?.uuid === item.nodeId)
+      || findJimengArchiveNode(canvas.nodes ?? [], item.likeKey);
+    if (!node) continue;
+    const metaData = buildJimengArchiveNodeMetaData(node, item);
+    if (metaData !== String(node.metaData || "")) updates.push({ uuid: node.uuid, metaData });
+  }
+  if (!updates.length) return { updated: 0 };
+  const result = await pixmaxApiPost("/canvas/node/batch", {
+    fileUuid: JIMENG_ARCHIVE_FILE_UUID,
+    baseRevision: canvas.revision,
+    create: [],
+    update: updates,
+    delete: []
+  });
+  if (!result.success) {
+    if (result.errCode === CANVAS_REVISION_CONFLICT && retryCount > 0) {
+      return repairJimengArchiveNodesFromLikes(items, retryCount - 1);
+    }
+    throw new Error(result.errMessage || result.errCode || "无法批量修复 Pixmax 归档节点信息。");
+  }
+  return { updated: updates.length };
+}
+
+function findJimengArchiveNode(nodes, likeKey) {
+  const targetKey = String(likeKey || "");
+  if (!targetKey) return null;
+  return (nodes || []).find((node) => {
+    try {
+      const metaData = parsePixmaxNodeMetaData(node);
+      return metaData?.data?.pixmaxHubSource === "jimeng"
+        && metaData?.data?.pixmaxHubLikeKey === targetKey;
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+function parsePixmaxNodeMetaData(node) {
+  try {
+    return JSON.parse(node?.metaData || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function getJimengArchiveNodePosition(nodes) {
+  let rightEdge = -80;
+  let top = 0;
+  let found = false;
+  for (const node of nodes || []) {
+    try {
+      const metaData = JSON.parse(node?.metaData || "{}");
+      const x = Number(metaData?.position?.x);
+      const y = Number(metaData?.position?.y);
+      const width = Number(metaData?.width || metaData?.measured?.width || 320);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      rightEdge = Math.max(rightEdge, x + (Number.isFinite(width) ? width : 320));
+      if (!found) top = y;
+      else top = Math.min(top, y);
+      found = true;
+    } catch {
+      // Ignore malformed legacy node metadata when choosing a free position.
+    }
+  }
+  return { x: Math.round(rightEdge + 80), y: Math.round(found ? top : 0) };
+}
+
+function getJimengArchiveNodeSize(asset, item) {
+  const sourceWidth = Number(asset?.width || item?.videoWidth || 0);
+  const sourceHeight = Number(asset?.height || item?.videoHeight || 0);
+  if (!(sourceWidth > 0 && sourceHeight > 0)) return { width: 480, height: 270 };
+  const scale = Math.min(480 / sourceWidth, 480 / sourceHeight, 1);
+  return {
+    width: Math.max(180, Math.round(sourceWidth * scale)),
+    height: Math.max(120, Math.round(sourceHeight * scale))
+  };
+}
+
+async function putPixmaxOssObject(body, authorization, contentType, streaming = false) {
+  const requiredFields = [
+    "endpoint",
+    "bucketName",
+    "accessKeyId",
+    "accessKeySecret",
+    "securityToken",
+    "objectKey",
+    "callbackUrl",
+    "callbackBody"
+  ];
+  const missing = requiredFields.filter((field) => !String(authorization?.[field] || "").trim());
+  if (missing.length) throw new Error(`Pixmax 上传授权缺少字段：${missing.join(", ")}`);
+
+  const endpoint = normalizeOssEndpoint(authorization.endpoint);
+  const objectPath = encodeOssObjectName(authorization.objectKey);
+  const isIpEndpoint = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(endpoint.hostname);
+  const bucketPrefix = `${authorization.bucketName}.`;
+  const hostname = isIpEndpoint || endpoint.hostname.startsWith(bucketPrefix)
+    ? endpoint.hostname
+    : `${bucketPrefix}${endpoint.hostname}`;
+  const basePath = endpoint.pathname.replace(/\/+$/, "");
+  const requestPath = isIpEndpoint
+    ? `${basePath}/${encodeURIComponent(authorization.bucketName)}/${objectPath}`
+    : `${basePath}/${objectPath}`;
+  const uploadUrl = `${endpoint.protocol}//${hostname}${endpoint.port ? `:${endpoint.port}` : ""}${requestPath}`;
+
+  const callbackConfig = {
+    callbackUrl: encodeURI(String(authorization.callbackUrl)),
+    callbackBody: String(authorization.callbackBody)
+  };
+  if (authorization.callbackBodyType) {
+    callbackConfig.callbackBodyType = String(authorization.callbackBodyType);
+  }
+  const callbackHeader = utf8ToBase64(JSON.stringify(callbackConfig));
+  const ossDate = new Date().toUTCString();
+  const ossHeaders = {
+    "x-oss-callback": callbackHeader,
+    "x-oss-date": ossDate,
+    "x-oss-security-token": String(authorization.securityToken)
+  };
+  const canonicalHeaders = Object.entries(ossHeaders)
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([name, value]) => `${name}:${String(value).trim()}`)
+    .join("\n");
+  const canonicalResource = `/${authorization.bucketName}/${objectPath}`;
+  const stringToSign = [
+    "PUT",
+    "",
+    contentType,
+    ossDate,
+    canonicalHeaders,
+    canonicalResource
+  ].join("\n");
+  const signature = await hmacSha1Base64(authorization.accessKeySecret, stringToSign);
+
+  let response;
+  try {
+    const requestOptions = {
+      method: "PUT",
+      credentials: "omit",
+      headers: {
+        Authorization: `OSS ${authorization.accessKeyId}:${signature}`,
+        "Content-Type": contentType,
+        ...ossHeaders
+      },
+      body
+    };
+    if (streaming) requestOptions.duplex = "half";
+    response = await fetch(uploadUrl, requestOptions);
+  } catch (error) {
+    throw new Error(`上传 Pixmax OSS 失败：${error?.message || String(error)}`);
+  }
+  const responseText = await response.text();
+  if (!response.ok && response.status !== 203) {
+    const ossError = extractOssError(responseText);
+    throw new Error(`上传 Pixmax OSS 失败：HTTP ${response.status}${ossError ? `（${ossError}）` : ""}`);
+  }
+  return parseJsonObject(responseText);
+}
+
+async function pollPixmaxUploadAsset(sessionId, authorization) {
+  for (let index = 0; index < PIXMAX_UPLOAD_POLL_LIMIT; index += 1) {
+    const result = await pixmaxApiPost("/assets/oss/check", { sessionId });
+    if (!result.success) throw new Error(result.errMessage || result.errCode || "Pixmax 上传状态查询失败。");
+    const state = result.data || {};
+    if (state.status === "FAILED") {
+      throw new Error(state.errorMessage || "Pixmax 处理上传视频失败。");
+    }
+    if (state.status === "COMPLETED") {
+      return normalizePixmaxUploadAsset(state.asset || state, authorization);
+    }
+    await delay(PIXMAX_UPLOAD_POLL_INTERVAL_MS);
+  }
+  throw new Error("Pixmax 处理视频超时，请稍后重试爱心收藏。");
+}
+
+function normalizePixmaxUploadAsset(value, authorization = {}, fallback = {}) {
+  const rawSource = value && typeof value === "object" ? value : {};
+  const source = rawSource.data && typeof rawSource.data === "object"
+    ? { ...rawSource, ...rawSource.data }
+    : rawSource;
+  return {
+    ...fallback,
+    ...source,
+    assetUuid: String(
+      source.assetUuid
+      || source.assetsUuid
+      || fallback.assetUuid
+      || fallback.assetsUuid
+      || ""
+    ).trim(),
+    height: Number(source.height || fallback.height || 0) || 0,
+    ossDomain: String(source.ossDomain || fallback.ossDomain || "").trim(),
+    ossSynced: source.ossSynced ?? fallback.ossSynced ?? false,
+    previewPath: source.previewPath || source.previewWebUrl || fallback.previewPath || fallback.previewWebUrl || "",
+    relativePath: source.relativePath || source.webUrl || fallback.relativePath || fallback.webUrl || authorization.webUrl || "",
+    thumbnailPath: source.thumbnailPath || source.thumbnailWebUrl || fallback.thumbnailPath || fallback.thumbnailWebUrl || "",
+    width: Number(source.width || fallback.width || 0) || 0
+  };
+}
+
+function resolvePixmaxAssetUrl(asset) {
+  return resolvePixmaxAssetPath(asset, asset?.relativePath || asset?.webUrl);
+}
+
+function resolvePixmaxAssetPreviewUrl(asset) {
+  return resolvePixmaxAssetPath(asset, asset?.previewPath || asset?.previewWebUrl || asset?.thumbnailPath);
+}
+
+function resolvePixmaxAssetPath(asset, rawPath) {
+  const path = String(rawPath || "").trim();
+  if (!path) return "";
+  if (/^https?:\/\//i.test(path)) return path;
+  const domain = String(asset?.ossDomain || "").trim().replace(/\/+$/, "");
+  if (asset?.ossSynced && /^https?:\/\//i.test(domain)) {
+    return `${domain}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+  return "";
+}
+
+function normalizeOssEndpoint(value) {
+  const raw = String(value || "").trim();
+  const endpoint = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  if (!/^https?:$/.test(endpoint.protocol)) throw new Error("Pixmax 返回了无效的 OSS endpoint。");
+  return endpoint;
+}
+
+function encodeOssObjectName(value) {
+  return String(value || "")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+async function hmacSha1Base64(secret, value) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(String(secret)),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
+  return bytesToBase64(new Uint8Array(signature));
+}
+
+function utf8ToBase64(value) {
+  return bytesToBase64(new TextEncoder().encode(String(value)));
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function parseJsonObject(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractOssError(value) {
+  const text = String(value || "");
+  const code = text.match(/<Code>([^<]+)<\/Code>/i)?.[1] || "";
+  const message = text.match(/<Message>([^<]+)<\/Message>/i)?.[1] || "";
+  return [code, message].filter(Boolean).join(": ").slice(0, 300);
+}
+
+function buildPixmaxVideoFileName(name, sourceUrl, contentType, archiveCode = "") {
+  let extension = contentType === "video/quicktime" ? ".mov" : ".mp4";
+  try {
+    const match = new URL(sourceUrl).pathname.match(/\.(mp4|mov|m4v|webm)$/i);
+    if (match) extension = `.${match[1].toLowerCase()}`;
+  } catch {
+    // Keep the MIME-derived extension.
+  }
+  const code = normalizeJimengArchiveCode(archiveCode) || buildJimengArchiveCode();
+  const base = sanitizeFilename(String(name || "即梦原片").replace(/\.(mp4|mov|m4v|webm)$/i, ""));
+  return `${code} ${base || "即梦原片"}${extension}`;
+}
+
+function buildJimengArchiveDisplayName(item, archiveCode = "") {
+  const code = normalizeJimengArchiveCode(archiveCode) || buildJimengArchiveCode();
+  const rawName = String(item?.name || "即梦原片")
+    .replace(/^JM-\d{8}-\d{6}\s*[·-]?\s*/i, "")
+    .replace(/\.(mp4|mov|m4v|webm)$/i, "")
+    .trim();
+  return `${code} · ${rawName || "即梦原片"}`.slice(0, 300);
+}
+
+function buildJimengArchiveCode(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    "JM-",
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join("");
+}
+
+function normalizeJimengArchiveCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  return /^JM-\d{8}-\d{6}$/.test(code) ? code : "";
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function getSharedOwnerItems(canvas, ownerName) {
@@ -1314,6 +2164,9 @@ function setLocalLikedItems(items) {
 }
 
 function friendlyExternalError(error) {
+  if (/读取即梦原片|上传 Pixmax|Pixmax 上传|写入指定画布/.test(error?.message || "")) {
+    return error.message;
+  }
   if (/Failed to fetch|NetworkError|fetch/i.test(error?.message || "")) {
     return "无法连接 Pixmax Review Board，请确认 Pixmax 已登录后重试。";
   }

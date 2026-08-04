@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PixmaxHub Plug",
-  "version": "2.0.19",
+  "version": "2.0.28",
   "description": "Add Pixmax and Jimeng collection helpers, Eagle import, and a shared team review board.",
   "permissions": [
     "storage",
@@ -20,6 +20,7 @@
     "https://*.bytecdn.com/*",
     "https://*.volces.com/*",
     "https://*.volccdn.com/*",
+    "https://*.aliyuncs.com/*",
     "https://api.github.com/*",
     "https://codeload.github.com/*",
     "https://raw.githubusercontent.com/*",

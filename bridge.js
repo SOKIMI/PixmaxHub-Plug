@@ -1730,6 +1730,7 @@
     const rawNode = rawNodes.find((node) => node.uuid === nodeId);
     const url = resolveAssetUrl(rawNode?.defaultAsset);
     const fallback = getDomAssetFallback(nodeId);
+    const archivedData = parseMetaData(rawNode ?? {}).data || {};
 
     if (!url && !fallback?.url) {
       throw new Error("The selected Pixmax result does not expose a media URL.");
@@ -1746,6 +1747,8 @@
       name: getNodeLabel(rawNode ?? {}) || fallback?.name || "",
       nodeId,
       poster: resolveAssetPreviewUrl(rawNode?.defaultAsset) || fallback?.poster || "",
+      promptContent: Array.isArray(archivedData.promptContent) ? archivedData.promptContent : [],
+      referenceImages: Array.isArray(archivedData.referenceImages) ? archivedData.referenceImages : [],
       url: url || fallback.url,
       website: location.href,
       ...videoDimensions

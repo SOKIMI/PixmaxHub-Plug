@@ -300,6 +300,7 @@ function matchesSearch(item) {
   const haystack = [
     item.name,
     item.annotation,
+    item.archiveCode,
     item.url,
     item.originalUrl,
     item.previewUrl,
@@ -309,6 +310,8 @@ function matchesSearch(item) {
     item.downloadCode,
     item.eagleCode,
     item.nodeId,
+    item.pixmaxAssetName,
+    item.pixmaxCanvasUrl,
     getItemDownloadCode(item),
     ...(Array.isArray(item.referenceImages)
       ? item.referenceImages.flatMap((image) => [image?.name, image?.url])
@@ -529,7 +532,10 @@ function renderItem(item) {
 
   const mediaUrl = getReviewMediaUrl(item);
   const copyUrl = getReviewCopyUrl(item);
-  const pageUrl = normalizeUrl(item.website) || mediaUrl;
+  const copyLabel = isJimengReviewItem(item)
+    ? item.storageProvider === "pixmax" ? "Copy Pixmax URL" : "Copy Original URL"
+    : "Copy URL";
+  const pageUrl = normalizeUrl(item.pixmaxCanvasUrl) || normalizeUrl(item.website) || mediaUrl;
   const isVideo = isVideoItem(item);
   const isAudio = isAudioUrl(mediaUrl);
   const isExpandableMedia = Boolean(mediaUrl && !isAudio);
@@ -583,14 +589,19 @@ function renderItem(item) {
   title.textContent = item.name || filenameFromUrl(mediaUrl) || (item.source === "jimeng" ? "即梦视频" : "Pixmax result");
   renderPromptContent(item, prompt);
   renderReferenceImages(item, referenceMedia, referenceImages);
-  const savedMeta = downloadCode
-    ? `${formatLikedAt(item.likedAt, item.likedBy)} · ${downloadCode}`
+  const savedCodes = [item.archiveCode, downloadCode].map(String).filter(Boolean).join(" · ");
+  const savedMeta = savedCodes
+    ? `${formatLikedAt(item.likedAt, item.likedBy)} · ${savedCodes}`
     : formatLikedAt(item.likedAt, item.likedBy);
   meta.textContent = item.source === "jimeng"
     ? `${savedMeta} · 即梦${item.linkMayExpire ? " · 源链接可能过期" : ""}`
     : savedMeta;
-  if (downloadCode) meta.title = `Eagle 下载编码：${downloadCode}`;
+  if (savedCodes) meta.title = `归档/下载编码：${savedCodes}`;
   open.href = buildFocusUrl(pageUrl, item.nodeId, item) || mediaUrl || "#";
+  if (item.storageProvider === "pixmax" && item.pixmaxCanvasUrl) {
+    open.textContent = "定位 Pixmax";
+    open.title = "打开归档画布并定位到这个视频节点";
+  }
   renderReviewPanel(item, card, ribbon);
   if (eagle) {
     eagle.disabled = !mediaUrl;
@@ -619,20 +630,22 @@ function renderItem(item) {
     if (!copyUrl) {
       copy.textContent = "No original URL";
       window.setTimeout(() => {
-        copy.textContent = isJimengReviewItem(item) ? "Copy Original URL" : "Copy URL";
+        copy.textContent = copyLabel;
       }, 1600);
       return;
     }
     await navigator.clipboard.writeText(copyUrl);
     copy.textContent = "Copied";
     window.setTimeout(() => {
-      copy.textContent = isJimengReviewItem(item) ? "Copy Original URL" : "Copy URL";
+      copy.textContent = copyLabel;
     }, 1200);
   });
   if (isJimengReviewItem(item)) {
-    copy.textContent = "Copy Original URL";
+    copy.textContent = copyLabel;
     copy.title = copyUrl
-      ? "复制即梦完整原片下载链接（包含全部签名参数）"
+      ? item.storageProvider === "pixmax"
+        ? "复制 Pixmax 归档原片链接"
+        : "复制即梦完整原片下载链接（包含全部签名参数）"
       : "此旧记录没有捕获到原片下载链接，请回到即梦重新点官方『下载原片』后刷新收藏";
   }
 
@@ -1001,14 +1014,15 @@ function createPreview(item, onMetadata) {
 
   if (isVideoItem(item)) {
     const video = document.createElement("video");
-    const poster = normalizeUrl(item.poster || item.thumbnailUrl || item.previewUrl);
+    const poster = normalizeUrl(item.pixmaxPreviewUrl || item.poster || item.thumbnailUrl);
     video.controls = true;
     video.muted = !reviewVideoSoundEnabled;
     video.playsInline = true;
-    video.preload = "none";
+    video.preload = poster ? "none" : "metadata";
     video.dataset.reviewVideo = "true";
     video.dataset.watchKey = getItemVideoWatchKey(item);
     video.dataset.src = url;
+    if (!poster) video.src = url;
     video.addEventListener("click", (event) => {
       if (video.hasAttribute("src")) return;
       event.stopPropagation();
@@ -1027,7 +1041,17 @@ function createPreview(item, onMetadata) {
       if (enabled === reviewVideoSoundEnabled) return;
       setReviewVideoSoundPreference(enabled);
     });
-    if (poster) video.poster = poster;
+    if (poster) {
+      video.poster = poster;
+      const posterProbe = new Image();
+      posterProbe.addEventListener("error", () => {
+        if (!video.isConnected || video.hasAttribute("src")) return;
+        video.removeAttribute("poster");
+        video.preload = "metadata";
+        video.src = video.dataset.src;
+      }, { once: true });
+      posterProbe.src = poster;
+    }
     return video;
   }
 
@@ -1412,7 +1436,7 @@ ${cards || "    <p>No liked results.</p>"}
 
 function renderExportCard(item) {
   const mediaUrl = getReviewMediaUrl(item);
-  const pageUrl = normalizeUrl(item.website);
+  const pageUrl = normalizeUrl(item.pixmaxCanvasUrl) || normalizeUrl(item.website);
   const title = item.name || filenameFromUrl(mediaUrl) || "Pixmax result";
   const preview = renderExportPreview(item);
   const meta = formatLikedAt(item.likedAt, item.likedBy);
@@ -1459,7 +1483,9 @@ function renderExportPreview(item) {
   if (!url) return "No preview";
   const escapedUrl = escapeAttribute(url);
   if (isVideoItem(item)) {
-    return `<video src="${escapedUrl}" controls muted preload="metadata"></video>`;
+    const poster = normalizeUrl(item.pixmaxPreviewUrl || item.poster || item.thumbnailUrl);
+    const posterAttribute = poster ? ` poster="${escapeAttribute(poster)}"` : "";
+    return `<video src="${escapedUrl}"${posterAttribute} controls muted preload="metadata"></video>`;
   }
   if (/\.(mp3|wav|m4a|aac|ogg)(\?|#|$)/i.test(url)) {
     return `<audio src="${escapedUrl}" controls preload="metadata"></audio>`;
@@ -1807,11 +1833,15 @@ function buildAssetInfoByNodeId(nodes) {
   for (const node of nodes || []) {
     if (!node?.uuid) continue;
     const assetUuid = getAssetUuidFromNode(node);
+    const nodeMetaData = parseNodeMetaData(node)?.data || {};
     map.set(node.uuid, {
+      annotation: String(nodeMetaData.annotation || nodeMetaData.prompt || nodeMetaData.description || "").trim(),
       assetUuid,
       downloadCode: buildDownloadCode(assetUuid, node.uuid),
       focusRect: getNodeFocusRect(node),
       mediaType: inferNodeMediaType(node),
+      promptContent: Array.isArray(nodeMetaData.promptContent) ? nodeMetaData.promptContent : [],
+      referenceImages: Array.isArray(nodeMetaData.referenceImages) ? nodeMetaData.referenceImages : [],
       ...getNodeVideoDimensions(node)
     });
   }
@@ -1874,10 +1904,13 @@ function enrichItemWithAssetInfo(item, assetInfoByNodeId) {
   if (!info) return item;
   return {
     ...item,
+    annotation: item.annotation || info.annotation,
     assetUuid: item.assetUuid || info.assetUuid,
     downloadCode: item.downloadCode || info.downloadCode,
     focusRect: normalizeFocusRect(item.focusRect) || info.focusRect,
     mediaType: item.mediaType || info.mediaType,
+    promptContent: item.promptContent?.length ? item.promptContent : info.promptContent,
+    referenceImages: item.referenceImages?.length ? item.referenceImages : info.referenceImages,
     videoWidth: item.videoWidth || info.videoWidth,
     videoHeight: item.videoHeight || info.videoHeight
   };
@@ -1887,10 +1920,13 @@ async function enrichItemsWithOriginalAssetInfo(items) {
   const pendingByFileUuid = new Map();
   let changed = false;
   for (const item of items || []) {
+    const needsJimengMetadata = isJimengReviewItem(item)
+      && (!item.annotation || !item.promptContent?.length || !item.referenceImages?.length);
     if (
       getItemDownloadCode(item) &&
       normalizeFocusRect(item.focusRect) &&
-      (!isVideoItem(item) || getVideoDimensions(item))
+      (!isVideoItem(item) || getVideoDimensions(item)) &&
+      !needsJimengMetadata
     ) continue;
     const fileUuid = String(item?.fileUuid || "").trim();
     const nodeId = String(item?.nodeId || "").trim();
@@ -1921,6 +1957,18 @@ async function enrichItemsWithOriginalAssetInfo(items) {
           }
           if (!item.mediaType && info.mediaType) {
             item.mediaType = info.mediaType;
+            changed = true;
+          }
+          if (!item.annotation && info.annotation) {
+            item.annotation = info.annotation;
+            changed = true;
+          }
+          if (!item.promptContent?.length && info.promptContent?.length) {
+            item.promptContent = info.promptContent;
+            changed = true;
+          }
+          if (!item.referenceImages?.length && info.referenceImages?.length) {
+            item.referenceImages = info.referenceImages;
             changed = true;
           }
           if (!getVideoDimensions(item) && info.videoWidth && info.videoHeight) {
@@ -2253,14 +2301,92 @@ async function getSharedLikedItems(options) {
   const changedRecords = [];
   await Promise.all(
     result.ownerRecords.map(async (record) => {
-      const changed = await enrichItemsWithOriginalAssetInfo(record.items);
+      const [enriched, refreshed] = await Promise.all([
+        enrichItemsWithOriginalAssetInfo(record.items),
+        refreshPixmaxArchivedItemLinks(record.items)
+      ]);
+      const changed = enriched || refreshed;
       if (changed) changedRecords.push(record);
     })
   );
+  syncSharedRuntimeItemsFromOwnerRecords(result);
   if (changedRecords.length) {
     persistEnrichedSharedItems(canvas, changedRecords).catch(() => {});
   }
   return result;
+}
+
+function syncSharedRuntimeItemsFromOwnerRecords(result) {
+  const updatedByIdentity = new Map();
+  for (const record of result.ownerRecords || []) {
+    for (const item of record.items || []) {
+      updatedByIdentity.set(`${record.ownerName}\n${getLikeKey(item)}`, item);
+    }
+  }
+  for (const runtimeItem of result.allItems || []) {
+    const updated = updatedByIdentity.get(`${runtimeItem.likedBy || "Unknown"}\n${getLikeKey(runtimeItem)}`);
+    if (updated) Object.assign(runtimeItem, updated);
+  }
+}
+
+async function refreshPixmaxArchivedItemLinks(items) {
+  const targets = (items || []).filter((item) =>
+    (item?.storageProvider === "pixmax" || item?.pixmaxAssetUuid)
+    && String(item?.pixmaxAssetUuid || item?.assetUuid || "").trim()
+  );
+  if (!targets.length) return false;
+  const assetUuids = [...new Set(targets.map((item) =>
+    String(item.pixmaxAssetUuid || item.assetUuid || "").trim()
+  ))];
+  let result;
+  try {
+    result = await apiPost("/assets/getAssetsLink", { assetUuids });
+  } catch {
+    return false;
+  }
+  if (!result.success || !Array.isArray(result.data)) return false;
+  const byUuid = new Map(result.data.map((asset) => [
+    String(asset?.assetsUuid || asset?.assetUuid || "").trim(),
+    asset
+  ]));
+  let changed = false;
+  for (const item of targets) {
+    const assetUuid = String(item.pixmaxAssetUuid || item.assetUuid || "").trim();
+    const asset = byUuid.get(assetUuid);
+    if (!asset) continue;
+    const url = resolvePixmaxArchivedAssetPath(asset, asset.webUrl || asset.relativePath);
+    const previewUrl = resolvePixmaxArchivedAssetPath(
+      asset,
+      asset.previewWebUrl || asset.previewPath || asset.thumbnailWebUrl || asset.thumbnailPath
+    );
+    if (url && (item.url !== url || item.originalUrl !== url || item.pixmaxUrl !== url)) {
+      item.url = url;
+      item.originalUrl = url;
+      item.pixmaxUrl = url;
+      changed = true;
+    }
+    if (previewUrl && item.pixmaxPreviewUrl !== previewUrl) {
+      item.pixmaxPreviewUrl = previewUrl;
+      changed = true;
+    }
+    if (item.linkMayExpire !== false || item.storageProvider !== "pixmax") {
+      item.linkMayExpire = false;
+      item.storageProvider = "pixmax";
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function resolvePixmaxArchivedAssetPath(asset, rawPath) {
+  const path = String(rawPath || "").trim();
+  if (!path) return "";
+  if (/^https?:\/\//i.test(path)) return path;
+  const domain = String(asset?.ossDomain || "").trim().replace(/\/+$/, "");
+  if (asset?.ossSynced && /^https?:\/\//i.test(domain)) {
+    return `${domain}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+  return "";
 }
 
 async function persistEnrichedSharedItems(canvas, records, retryCount = 1) {
