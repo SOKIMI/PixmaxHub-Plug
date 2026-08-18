@@ -2416,11 +2416,17 @@ const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree
     const options = await syncStorageGet(SHARED_OPTIONS_DEFAULTS);
     const workspaceId = globalThis.PixmaxProjectScopes?.extractWorkspaceId(location.href) || "";
     const projects = globalThis.PixmaxProjectScopes?.migrateProjects(options) || [];
-    const project = globalThis.PixmaxProjectScopes?.findProject(projects, workspaceId) || null;
+    const project = globalThis.PixmaxProjectScopes?.findProject(
+      projects,
+      workspaceId,
+      options.sharedLikesActiveProjectId,
+      getCurrentFileUuid()
+    ) || null;
     const fileUuid = String(project?.fileUuid || "").trim();
     const ownerName = String(project?.ownerName || "").trim();
     return {
       allowLegacyData: Boolean(project?.acceptLegacyData),
+      allowCanvasProjectMigration: Boolean(fileUuid),
       color: normalizeColor(project?.color),
       enabled: Boolean(project?.enabled && fileUuid && ownerName),
       fileUuid,
@@ -4449,6 +4455,7 @@ const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree
           color: sharedOptions.color,
           projectId: sharedOptions.projectId,
           allowLegacyData: sharedOptions.allowLegacyData,
+          allowCanvasProjectMigration: sharedOptions.allowCanvasProjectMigration,
           lightweight: true
         },
         15000
@@ -4555,6 +4562,7 @@ const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree
             color: sharedOptions.color,
             projectId: sharedOptions.projectId,
             allowLegacyData: sharedOptions.allowLegacyData,
+            allowCanvasProjectMigration: sharedOptions.allowCanvasProjectMigration,
             item,
             lightweight: true
           },

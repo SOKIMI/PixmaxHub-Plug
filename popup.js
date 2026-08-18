@@ -149,7 +149,9 @@ function init() {
 }
 
 function getSelectedSharedProject() {
-  return sharedProjects.find((project) => project.id === activeSharedProjectId) || null;
+  return sharedProjects.find(
+    (project) => project.id === activeSharedProjectId || project.legacyIds?.includes(activeSharedProjectId)
+  ) || null;
 }
 
 function renderSharedProjectSelect() {
@@ -192,6 +194,9 @@ function updateSelectedProject(patch) {
   if (!current) throw new Error("请先选择项目。");
   const next = PixmaxProjectScopes.normalizeProject({ ...current, ...patch });
   sharedProjects = sharedProjects.map((project) => (project.id === current.id ? next : project));
+  if (activeSharedProjectId === current.id || current.legacyIds?.includes(activeSharedProjectId)) {
+    activeSharedProjectId = next.id;
+  }
   return next;
 }
 

@@ -28,7 +28,7 @@ header {
   top: 73px;
   z-index: 3;
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(180px, 240px) minmax(220px, 1fr) auto;
   gap: 12px;
   align-items: end;
   padding: 12px 24px;
@@ -45,7 +45,16 @@ header {
   font-size: 11px;
 }
 
+.project-field {
+  display: grid;
+  gap: 6px;
+  min-width: 190px;
+  color: #a9adb5;
+  font-size: 11px;
+}
+
 .search-field input,
+.project-field select,
 .tag-input {
   min-height: 34px;
   box-sizing: border-box;
@@ -60,6 +69,7 @@ header {
 }
 
 .search-field input:focus,
+.project-field select:focus,
 .tag-input:focus {
   border-color: #75e9f4;
   box-shadow: 0 0 0 2px rgb(117 233 244 / 14%);

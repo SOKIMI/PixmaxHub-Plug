@@ -715,7 +715,8 @@
       fileUuid,
       ownerName,
       projectId,
-      allowLegacyData: Boolean(payload.allowLegacyData)
+      allowLegacyData: Boolean(payload.allowLegacyData),
+      allowCanvasProjectMigration: Boolean(payload.allowCanvasProjectMigration)
     };
   }
 
@@ -880,6 +881,7 @@
   function belongsToProject(parsed, options) {
     if (!parsed) return false;
     if (!options?.projectId) return true;
+    if (options.allowCanvasProjectMigration) return true;
     if (parsed.projectId) return parsed.projectId === options.projectId;
     return Boolean(options.allowLegacyData);
   }
@@ -894,7 +896,7 @@
     });
     if (marked) return marked;
 
-    if (options.projectId && !options.allowLegacyData) return null;
+    if (options.projectId && !options.allowLegacyData && !options.allowCanvasProjectMigration) return null;
 
     const byLabel = textNodes.find((node) => getRawNodeLabel(node) === normalizedOwner);
     if (byLabel) return byLabel;
