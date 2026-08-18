@@ -28,7 +28,6 @@ const MESSAGE = {
   EAGLE_IMPORT_URL: "pixmax-cloner:eagle-import-url"
 };
 const DEFAULT_LIKE_COLOR = "#ff3864";
-const REQUESTED_PROJECT_ID = new URLSearchParams(location.search).get("project") || "";
 const SHARED_OPTIONS_DEFAULTS = {
   sharedLikesEnabled: false,
   sharedLikesCanvasUrl: "",
@@ -38,6 +37,10 @@ const SHARED_OPTIONS_DEFAULTS = {
   sharedLikesProjects: [],
   sharedLikesActiveProjectId: ""
 };
+
+function getRequestedProjectId() {
+  return new URLSearchParams(location.search).get("project") || "";
+}
 
 const grid = document.querySelector("#likesGrid");
 const count = document.querySelector("#count");
@@ -53,6 +56,7 @@ const batchEagleButton = document.querySelector("#batchEagle");
 const exportHtmlButton = document.querySelector("#exportHtml");
 const exportJsonButton = document.querySelector("#exportJson");
 const clearButton = document.querySelector("#clearLikes");
+const reviewProjectSelect = document.querySelector("#reviewProject");
 const template = document.querySelector("#likeTemplate");
 let currentItems = [];
 let allSharedItems = [];
@@ -85,6 +89,7 @@ function init() {
     syncReviewVideoSoundPreference();
   });
   refreshLikesButton?.addEventListener("click", refreshLikes);
+  reviewProjectSelect?.addEventListener("change", selectReviewProject);
   togglePromptsButton.addEventListener("click", togglePrompts);
   multiSelectButton.addEventListener("click", toggleMultiSelect);
   batchEagleButton.addEventListener("click", importSelectedLikesToEagle);
@@ -142,6 +147,7 @@ function loadLikes() {
   return new Promise((resolve) => {
     chrome.storage.sync.get(SHARED_OPTIONS_DEFAULTS, async (options) => {
       sharedOptions = getSharedOptions(options);
+      renderProjectSelector(sharedOptions.projects, sharedOptions.projectId);
       sharedMode = sharedOptions.enabled;
       localLikesStorageKey = sharedOptions.localLikesStorageKey;
 
@@ -174,6 +180,28 @@ function loadLikes() {
       });
     });
   });
+}
+
+function renderProjectSelector(projects = [], selectedId = "") {
+  if (!reviewProjectSelect) return;
+  reviewProjectSelect.textContent = "";
+  for (const project of projects) {
+    const option = new Option(project.name, project.id);
+    if (!project.fileUuid || !project.ownerName) option.textContent += "（未配置）";
+    reviewProjectSelect.append(option);
+  }
+  reviewProjectSelect.value = selectedId;
+  reviewProjectSelect.disabled = !projects.length;
+}
+
+async function selectReviewProject() {
+  const projectId = reviewProjectSelect?.value || "";
+  if (!projectId) return;
+  const url = new URL(location.href);
+  url.searchParams.set("project", projectId);
+  history.replaceState(null, "", url);
+  await chrome.storage.sync.set({ sharedLikesActiveProjectId: projectId });
+  await loadLikes();
 }
 
 async function refreshLikes() {
@@ -1624,18 +1652,20 @@ function getSharedOptions(options) {
   const project = globalThis.PixmaxProjectScopes?.findProject(
     projects,
     "",
-    REQUESTED_PROJECT_ID || options.sharedLikesActiveProjectId
+    getRequestedProjectId() || options.sharedLikesActiveProjectId
   ) || null;
   const fileUuid = String(project?.fileUuid || "").trim();
   const ownerName = String(project?.ownerName || "").trim();
   return {
     allowLegacyData: Boolean(project?.acceptLegacyData),
+    allowCanvasProjectMigration: Boolean(fileUuid),
     color: normalizeColor(project?.color),
     enabled: Boolean(project?.enabled && fileUuid && ownerName),
     fileUuid,
     localLikesStorageKey: globalThis.PixmaxProjectScopes?.getLocalLikesStorageKey(LIKES_STORAGE_KEY, project) || LIKES_STORAGE_KEY,
     ownerName,
-    projectId: String(project?.id || "").trim()
+    projectId: String(project?.id || "").trim(),
+    projects
   };
 }
 
@@ -2014,6 +2044,7 @@ async function enrichItemsWithOriginalAssetInfo(items) {
 }
 
 function belongsToCurrentProject(record) {
+  if (sharedOptions?.allowCanvasProjectMigration) return true;
   if (record?.projectId) return record.projectId === sharedOptions?.projectId;
   return Boolean(sharedOptions?.allowLegacyData);
 }
@@ -2026,7 +2057,11 @@ function findSharedLikesOwnerNode(nodes, ownerName) {
   });
   if (marked) return marked;
 
-  if (sharedOptions?.projectId && !sharedOptions.allowLegacyData) return null;
+  if (
+    sharedOptions?.projectId &&
+    !sharedOptions.allowLegacyData &&
+    !sharedOptions.allowCanvasProjectMigration
+  ) return null;
 
   const byLabel = textNodes.find((node) => getRawNodeLabel(node) === ownerName);
   if (byLabel) return byLabel;
