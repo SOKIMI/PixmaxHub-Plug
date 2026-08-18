@@ -28,11 +28,15 @@ const MESSAGE = {
   EAGLE_IMPORT_URL: "pixmax-cloner:eagle-import-url"
 };
 const DEFAULT_LIKE_COLOR = "#ff3864";
+const REQUESTED_PROJECT_ID = new URLSearchParams(location.search).get("project") || "";
 const SHARED_OPTIONS_DEFAULTS = {
   sharedLikesEnabled: false,
+  sharedLikesCanvasUrl: "",
   sharedLikesFileUuid: "",
   sharedLikesOwnerName: "",
-  sharedLikesColor: DEFAULT_LIKE_COLOR
+  sharedLikesColor: DEFAULT_LIKE_COLOR,
+  sharedLikesProjects: [],
+  sharedLikesActiveProjectId: ""
 };
 
 const grid = document.querySelector("#likesGrid");
@@ -70,6 +74,7 @@ let watchedVideoKeys = new Set();
 let knownVideoKeys = new Set();
 let unreadVideoKeys = new Set();
 let resolutionRenderTimer = 0;
+let localLikesStorageKey = LIKES_STORAGE_KEY;
 
 init();
 
@@ -112,10 +117,10 @@ function init() {
     });
   }
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local" && changes[LIKES_STORAGE_KEY]) {
+    if (areaName === "local" && changes[localLikesStorageKey]) {
       if (sharedMode) return;
       const viewport = captureGridViewport();
-      setActiveItems(changes[LIKES_STORAGE_KEY].newValue || []);
+      setActiveItems(changes[localLikesStorageKey].newValue || []);
       restoreGridViewport(viewport);
     }
     if (
@@ -123,7 +128,9 @@ function init() {
       (changes.sharedLikesEnabled ||
         changes.sharedLikesFileUuid ||
         changes.sharedLikesOwnerName ||
-        changes.sharedLikesColor)
+        changes.sharedLikesColor ||
+        changes.sharedLikesProjects ||
+        changes.sharedLikesActiveProjectId)
     ) {
       loadLikes();
     }
@@ -136,6 +143,7 @@ function loadLikes() {
     chrome.storage.sync.get(SHARED_OPTIONS_DEFAULTS, async (options) => {
       sharedOptions = getSharedOptions(options);
       sharedMode = sharedOptions.enabled;
+      localLikesStorageKey = sharedOptions.localLikesStorageKey;
 
       if (sharedMode) {
         try {
@@ -151,10 +159,12 @@ function loadLikes() {
         return;
       }
 
-      chrome.storage.local.get({ [LIKES_STORAGE_KEY]: [] }, async (result) => {
+      chrome.storage.local.get({ [LIKES_STORAGE_KEY]: [], [localLikesStorageKey]: [] }, async (result) => {
         allSharedItems = [];
         renderOwnerFilters([]);
-        const items = Array.isArray(result[LIKES_STORAGE_KEY]) ? result[LIKES_STORAGE_KEY] : [];
+        const scopedItems = Array.isArray(result[localLikesStorageKey]) ? result[localLikesStorageKey] : [];
+        const legacyItems = Array.isArray(result[LIKES_STORAGE_KEY]) ? result[LIKES_STORAGE_KEY] : [];
+        const items = scopedItems.length || !sharedOptions.allowLegacyData ? scopedItems : legacyItems;
         if (await enrichItemsWithOriginalAssetInfo(items)) {
           setLocalLikedItems(items).catch(() => {});
         }
@@ -1340,11 +1350,11 @@ function removeLike(item) {
     return;
   }
 
-  chrome.storage.local.get({ [LIKES_STORAGE_KEY]: [] }, (result) => {
+  chrome.storage.local.get({ [localLikesStorageKey]: [] }, (result) => {
     const targetKey = getLikeKey(item);
-    const items = (Array.isArray(result[LIKES_STORAGE_KEY]) ? result[LIKES_STORAGE_KEY] : [])
+    const items = (Array.isArray(result[localLikesStorageKey]) ? result[localLikesStorageKey] : [])
       .filter((likedItem) => getLikeKey(likedItem) !== targetKey);
-    chrome.storage.local.set({ [LIKES_STORAGE_KEY]: items });
+    chrome.storage.local.set({ [localLikesStorageKey]: items });
   });
 }
 
@@ -1356,7 +1366,7 @@ function clearLikes() {
   }
 
   if (!confirm("Clear all Pixmax Likes?")) return;
-  chrome.storage.local.set({ [LIKES_STORAGE_KEY]: [] });
+  chrome.storage.local.set({ [localLikesStorageKey]: [] });
 }
 
 function exportHtml() {
@@ -1610,13 +1620,22 @@ function compactTime(value) {
 }
 
 function getSharedOptions(options) {
-  const fileUuid = String(options.sharedLikesFileUuid || "").trim();
-  const ownerName = String(options.sharedLikesOwnerName || "").trim();
+  const projects = globalThis.PixmaxProjectScopes?.migrateProjects(options) || [];
+  const project = globalThis.PixmaxProjectScopes?.findProject(
+    projects,
+    "",
+    REQUESTED_PROJECT_ID || options.sharedLikesActiveProjectId
+  ) || null;
+  const fileUuid = String(project?.fileUuid || "").trim();
+  const ownerName = String(project?.ownerName || "").trim();
   return {
-    color: normalizeColor(options.sharedLikesColor),
-    enabled: Boolean(options.sharedLikesEnabled && fileUuid && ownerName),
+    allowLegacyData: Boolean(project?.acceptLegacyData),
+    color: normalizeColor(project?.color),
+    enabled: Boolean(project?.enabled && fileUuid && ownerName),
     fileUuid,
-    ownerName
+    localLikesStorageKey: globalThis.PixmaxProjectScopes?.getLocalLikesStorageKey(LIKES_STORAGE_KEY, project) || LIKES_STORAGE_KEY,
+    ownerName,
+    projectId: String(project?.id || "").trim()
   };
 }
 
@@ -1661,6 +1680,7 @@ function parseSharedLikeText(value) {
     return {
       color: normalizeColor(data.color),
       ownerName: String(data.ownerName || "").trim(),
+      projectId: String(data.projectId || "").trim(),
       settings: data.settings && typeof data.settings === "object" ? data.settings : {},
       items: data.items.filter((item) => item && typeof item === "object")
     };
@@ -1723,6 +1743,7 @@ function normalizeSocialData(data = {}) {
           .filter((comment) => comment && typeof comment === "object")
           .map((comment) => ({
             id: String(comment.id || crypto.randomUUID()),
+            projectId: String(comment.projectId || "").trim(),
             targetKey: String(comment.targetKey || ""),
             targetOwner: String(comment.targetOwner || ""),
             userName: String(comment.userName || "").trim(),
@@ -1736,6 +1757,7 @@ function normalizeSocialData(data = {}) {
       ? data.likes
           .filter((like) => like && typeof like === "object")
           .map((like) => ({
+            projectId: String(like.projectId || "").trim(),
             targetKey: String(like.targetKey || ""),
             targetOwner: String(like.targetOwner || ""),
             userName: String(like.userName || "").trim(),
@@ -1748,6 +1770,7 @@ function normalizeSocialData(data = {}) {
       ? data.reviews
           .filter((review) => review && typeof review === "object")
           .map((review) => ({
+            projectId: String(review.projectId || "").trim(),
             targetKey: String(review.targetKey || ""),
             targetOwner: String(review.targetOwner || ""),
             userName: String(review.userName || "").trim(),
@@ -1990,10 +2013,20 @@ async function enrichItemsWithOriginalAssetInfo(items) {
   return changed;
 }
 
+function belongsToCurrentProject(record) {
+  if (record?.projectId) return record.projectId === sharedOptions?.projectId;
+  return Boolean(sharedOptions?.allowLegacyData);
+}
+
 function findSharedLikesOwnerNode(nodes, ownerName) {
   const textNodes = nodes.filter(isTextLikeNode);
-  const marked = textNodes.find((node) => parseSharedLikeText(getRawNodeText(node))?.ownerName === ownerName);
+  const marked = textNodes.find((node) => {
+    const parsed = parseSharedLikeText(getRawNodeText(node));
+    return parsed?.ownerName === ownerName && belongsToCurrentProject(parsed);
+  });
   if (marked) return marked;
+
+  if (sharedOptions?.projectId && !sharedOptions.allowLegacyData) return null;
 
   const byLabel = textNodes.find((node) => getRawNodeLabel(node) === ownerName);
   if (byLabel) return byLabel;
@@ -2063,6 +2096,7 @@ function buildSharedLikeText(ownerName, items, color = DEFAULT_LIKE_COLOR, setti
         {
           version: 1,
           ownerName,
+          projectId: sharedOptions?.projectId || "",
           color: normalizeColor(color),
           settings,
           updatedAt: new Date().toISOString(),
@@ -2178,7 +2212,7 @@ function getSharedLikesFromCanvas(canvas, ownerName) {
   for (const node of canvas.nodes ?? []) {
     if (!isTextLikeNode(node)) continue;
     const parsed = parseSharedLikeText(getRawNodeText(node));
-    if (parsed) {
+    if (parsed && belongsToCurrentProject(parsed)) {
       const likedBy = parsed.ownerName || getRawNodeLabel(node) || "Unknown";
       const likedByColor = normalizeColor(parsed.color);
       ownerColors.set(likedBy, likedByColor);
@@ -2205,8 +2239,13 @@ function getSharedLikesFromCanvas(canvas, ownerName) {
   }
 
   allItems.sort((first, second) => String(second.likedAt || "").localeCompare(String(first.likedAt || "")));
+  const projectSocialData = {
+    comments: socialData.comments.filter(belongsToCurrentProject),
+    likes: socialData.likes.filter(belongsToCurrentProject),
+    reviews: socialData.reviews.filter(belongsToCurrentProject)
+  };
   return {
-    allItems: attachSocialData(allItems, socialData, ownerName, ownerColors),
+    allItems: attachSocialData(allItems, projectSocialData, ownerName, ownerColors),
     ownItems,
     currentOwnerSettings,
     ownerRecords,
@@ -2481,11 +2520,13 @@ async function saveSharedOwnItems(items, retryCount = 1) {
     throw new Error(result.errMessage || result.errCode || "Could not update shared Likes.");
   }
 
-  try {
-    const nextCanvas = await fetchSharedCanvas();
-    await upsertLikeIndexForOwner(nextCanvas, sharedOptions.ownerName, sharedOptions.color, items);
-  } catch {
-    // Likes were saved successfully; the index can be repaired on the next write.
+  if (!sharedOptions.projectId) {
+    try {
+      const nextCanvas = await fetchSharedCanvas();
+      await upsertLikeIndexForOwner(nextCanvas, sharedOptions.ownerName, sharedOptions.color, items);
+    } catch {
+      // Likes were saved successfully; the index can be repaired on the next write.
+    }
   }
 }
 
@@ -2602,11 +2643,13 @@ async function toggleSocialLike(item) {
         !(
           like.targetKey === targetKey &&
           like.targetOwner === targetOwner &&
-          like.userName === userName
+          like.userName === userName &&
+          belongsToCurrentProject(like)
         )
     );
     if (likes.length === data.likes.length) {
       likes.push({
+        projectId: sharedOptions.projectId,
         targetKey,
         targetOwner,
         userName,
@@ -2636,6 +2679,7 @@ async function addSocialComment(item, text) {
       ...data.comments,
       {
         id: crypto.randomUUID(),
+        projectId: sharedOptions.projectId,
         targetKey,
         targetOwner,
         userName,
@@ -2691,18 +2735,21 @@ async function updateReviewData(item, mutator) {
         !(
           review.targetKey === targetKey &&
           review.targetOwner === targetOwner &&
-          review.userName === userName
+          review.userName === userName &&
+          belongsToCurrentProject(review)
         )
     );
     const previous = data.reviews.find(
       (review) =>
         review.targetKey === targetKey &&
         review.targetOwner === targetOwner &&
-        review.userName === userName
+        review.userName === userName &&
+        belongsToCurrentProject(review)
     ) || {
       targetKey,
       targetOwner,
       userName,
+      projectId: sharedOptions.projectId,
       color,
       status: "",
       tags: []
@@ -2713,6 +2760,7 @@ async function updateReviewData(item, mutator) {
       targetKey,
       targetOwner,
       userName,
+      projectId: sharedOptions.projectId,
       color,
       tags: parseTags((mutated.tags || []).join(",")),
       updatedAt: new Date().toISOString()
@@ -2750,20 +2798,20 @@ async function updateLocalReviewData(item, mutator) {
 
 function getLocalLikedItems() {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.get({ [LIKES_STORAGE_KEY]: [] }, (result) => {
+    chrome.storage.local.get({ [localLikesStorageKey]: [] }, (result) => {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) {
         reject(new Error(runtimeError.message));
         return;
       }
-      resolve(Array.isArray(result[LIKES_STORAGE_KEY]) ? result[LIKES_STORAGE_KEY] : []);
+      resolve(Array.isArray(result[localLikesStorageKey]) ? result[localLikesStorageKey] : []);
     });
   });
 }
 
 function setLocalLikedItems(items) {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.set({ [LIKES_STORAGE_KEY]: items }, () => {
+    chrome.storage.local.set({ [localLikesStorageKey]: items }, () => {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) reject(new Error(runtimeError.message));
       else resolve();

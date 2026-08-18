@@ -38,7 +38,7 @@
   const KNOWN_VIDEO_CANVAS_MODEL_KEY = "pixmaxKnownVideoCanvasModelAt";
   const LIVE_IDENTITY_STORAGE_KEY = "pixmaxHubLiveIdentity";
   const UPDATE_CHECK_STORAGE_KEY = "pixmaxHubUpdateReminder";
-  const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/171896542/PixmaxHub-Plug/tree/main";
+const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree/main";
   const UPDATE_REMINDER_INTERVAL_MS = 6 * 60 * 60 * 1000;
   const DEFAULT_LIKE_COLOR = "#ff3864";
   const LIVE_CURSOR_SEND_INTERVAL_MS = 45;
@@ -63,9 +63,12 @@
   ];
   const SHARED_OPTIONS_DEFAULTS = {
     sharedLikesEnabled: true,
+    sharedLikesCanvasUrl: "",
     sharedLikesFileUuid: "",
     sharedLikesOwnerName: "",
     sharedLikesColor: DEFAULT_LIKE_COLOR,
+    sharedLikesProjects: [],
+    sharedLikesActiveProjectId: "",
     liveCollabEnabled: true
   };
   const requests = new Map();
@@ -942,9 +945,9 @@
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      requestExtension("open-review-board", {}, 5000).catch((error) => {
-        showToast(error.message || "无法打开 Review Board。", true);
-      });
+      getSharedLikeOptions()
+        .then((options) => requestExtension("open-review-board", { projectId: options.projectId }, 5000))
+        .catch((error) => showToast(error.message || "无法打开 Review Board。", true));
     });
     return button;
   }
@@ -2411,13 +2414,23 @@
 
   async function getSharedLikeOptions() {
     const options = await syncStorageGet(SHARED_OPTIONS_DEFAULTS);
-    const fileUuid = String(options.sharedLikesFileUuid || "").trim();
-    const ownerName = String(options.sharedLikesOwnerName || "").trim();
+    const workspaceId = globalThis.PixmaxProjectScopes?.extractWorkspaceId(location.href) || "";
+    const projects = globalThis.PixmaxProjectScopes?.migrateProjects(options) || [];
+    const project = globalThis.PixmaxProjectScopes?.findProject(projects, workspaceId) || null;
+    const fileUuid = String(project?.fileUuid || "").trim();
+    const ownerName = String(project?.ownerName || "").trim();
     return {
-      color: normalizeColor(options.sharedLikesColor),
-      enabled: Boolean(options.sharedLikesEnabled && fileUuid && ownerName),
+      allowLegacyData: Boolean(project?.acceptLegacyData),
+      color: normalizeColor(project?.color),
+      enabled: Boolean(project?.enabled && fileUuid && ownerName),
       fileUuid,
+      localLikesStorageKey: globalThis.PixmaxProjectScopes?.getLocalLikesStorageKey(
+        LIKES_STORAGE_KEY,
+        project,
+        workspaceId
+      ) || LIKES_STORAGE_KEY,
       ownerName,
+      projectId: String(project?.id || "").trim(),
       sourceFileUuid: getCurrentFileUuid()
     };
   }
@@ -4416,8 +4429,12 @@
     }, 300);
   }
 
-  async function getLikedItems() {
-    const result = await storageGet({ [LIKES_STORAGE_KEY]: [] });
+  async function getLikedItems(scope = null) {
+    const options = scope || await getSharedLikeOptions();
+    const scopedKey = options.localLikesStorageKey || LIKES_STORAGE_KEY;
+    const result = await storageGet({ [LIKES_STORAGE_KEY]: [], [scopedKey]: [] });
+    const scopedItems = Array.isArray(result[scopedKey]) ? result[scopedKey] : [];
+    if (scopedItems.length || !options.allowLegacyData || scopedKey === LIKES_STORAGE_KEY) return scopedItems;
     return Array.isArray(result[LIKES_STORAGE_KEY]) ? result[LIKES_STORAGE_KEY] : [];
   }
 
@@ -4430,6 +4447,8 @@
           fileUuid: sharedOptions.fileUuid,
           ownerName: sharedOptions.ownerName,
           color: sharedOptions.color,
+          projectId: sharedOptions.projectId,
+          allowLegacyData: sharedOptions.allowLegacyData,
           lightweight: true
         },
         15000
@@ -4448,7 +4467,7 @@
       };
     }
 
-    const localItems = await getLikedItems();
+    const localItems = await getLikedItems(sharedOptions);
     return {
       shared: false,
       allItems: localItems,
@@ -4497,8 +4516,9 @@
     }
   }
 
-  async function saveLikedItems(items) {
-    await storageSet({ [LIKES_STORAGE_KEY]: items });
+  async function saveLikedItems(items, scope = null) {
+    const options = scope || await getSharedLikeOptions();
+    await storageSet({ [options.localLikesStorageKey || LIKES_STORAGE_KEY]: items });
   }
 
   async function toggleSelectedLike(button) {
@@ -4533,6 +4553,8 @@
             fileUuid: sharedOptions.fileUuid,
             ownerName: sharedOptions.ownerName,
             color: sharedOptions.color,
+            projectId: sharedOptions.projectId,
+            allowLegacyData: sharedOptions.allowLegacyData,
             item,
             lightweight: true
           },
@@ -4570,12 +4592,12 @@
         return;
       }
 
-      const likedItems = await getLikedItems();
+      const likedItems = await getLikedItems(sharedOptions);
       const existingIndex = likedItems.findIndex((likedItem) => getLikeKey(likedItem) === likeKey);
 
       if (existingIndex >= 0) {
         likedItems.splice(existingIndex, 1);
-        await saveLikedItems(likedItems);
+        await saveLikedItems(likedItems, sharedOptions);
         likedKeys.delete(likeKey);
         ownLikedKeys.delete(likeKey);
         likedColors.delete(likeKey);
@@ -4593,7 +4615,7 @@
           likedAt: new Date().toISOString()
         },
         ...likedItems
-      ]);
+      ], sharedOptions);
       likedKeys.add(likeKey);
       ownLikedKeys.add(likeKey);
       likedColors.set(likeKey, DEFAULT_LIKE_COLOR);
@@ -5316,15 +5338,11 @@
     focusNodeFromUrl().catch(() => focusNode(getFocusNodeId()));
     globalThis.chrome?.storage?.onChanged?.addListener((changes, areaName) => {
       let videoWatchStateChanged = false;
-      if (areaName === "local" && changes[LIKES_STORAGE_KEY]) {
-        const items = Array.isArray(changes[LIKES_STORAGE_KEY].newValue)
-          ? changes[LIKES_STORAGE_KEY].newValue
-          : [];
-        likedKeys = new Set(items.map(getLikeKey).filter(Boolean));
-        ownLikedKeys = new Set(items.map(getLikeKey).filter(Boolean));
-        likedColors = buildColorMap({ allItems: items });
-        applyVisibleLikedMarks();
-        updateVideoHistoryLikeMarks();
+      if (
+        areaName === "local" &&
+        Object.keys(changes).some((key) => key === LIKES_STORAGE_KEY || key.startsWith(`${LIKES_STORAGE_KEY}:project:`))
+      ) {
+        refreshLikedState().then(updateVideoHistoryLikeMarks, () => {});
       }
       if (areaName === "local" && changes[PERFORMANCE_MODE_STORAGE_KEY]) {
         setPerformanceModeEnabled(Boolean(changes[PERFORMANCE_MODE_STORAGE_KEY].newValue), {
@@ -5360,7 +5378,9 @@
         (changes.sharedLikesEnabled ||
           changes.sharedLikesFileUuid ||
           changes.sharedLikesOwnerName ||
-          changes.sharedLikesColor)
+          changes.sharedLikesColor ||
+          changes.sharedLikesProjects ||
+          changes.sharedLikesActiveProjectId)
       ) {
         refreshLikedState();
         refreshWatchedVideoState({ force: true });

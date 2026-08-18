@@ -707,12 +707,15 @@
   function parseSharedOptions(payload = {}) {
     const fileUuid = String(payload.fileUuid || "").trim();
     const ownerName = String(payload.ownerName || "").trim();
+    const projectId = String(payload.projectId || "").trim();
     if (!fileUuid) throw new Error("请先设置共享 Likes 画布链接。");
     if (!ownerName) throw new Error("请先设置你的共享 Likes 名字。");
     return {
       color: normalizeColor(payload.color),
       fileUuid,
-      ownerName
+      ownerName,
+      projectId,
+      allowLegacyData: Boolean(payload.allowLegacyData)
     };
   }
 
@@ -735,6 +738,7 @@
       return {
         color: normalizeColor(data.color),
         ownerName: String(data.ownerName || "").trim(),
+        projectId: String(data.projectId || "").trim(),
         settings: data.settings && typeof data.settings === "object" ? data.settings : {},
         items: data.items.filter((item) => item && typeof item === "object")
       };
@@ -873,15 +877,24 @@
     return typeof rawNode?.nodeText === "string";
   }
 
-  function findSharedLikesOwnerNode(nodes, ownerName) {
+  function belongsToProject(parsed, options) {
+    if (!parsed) return false;
+    if (!options?.projectId) return true;
+    if (parsed.projectId) return parsed.projectId === options.projectId;
+    return Boolean(options.allowLegacyData);
+  }
+
+  function findSharedLikesOwnerNode(nodes, ownerName, options = {}) {
     const normalizedOwner = ownerName.trim();
     const textNodes = nodes.filter(isTextLikeNode);
 
     const marked = textNodes.find((node) => {
       const parsed = parseSharedLikeText(getRawNodeText(node));
-      return parsed?.ownerName === normalizedOwner;
+      return parsed?.ownerName === normalizedOwner && belongsToProject(parsed, options);
     });
     if (marked) return marked;
+
+    if (options.projectId && !options.allowLegacyData) return null;
 
     const byLabel = textNodes.find((node) => getRawNodeLabel(node) === normalizedOwner);
     if (byLabel) return byLabel;
@@ -929,7 +942,7 @@
     );
   }
 
-  function buildSharedLikeText(ownerName, items, color = DEFAULT_LIKE_COLOR, settings = {}) {
+  function buildSharedLikeText(ownerName, items, color = DEFAULT_LIKE_COLOR, settings = {}, projectId = "") {
     return [
       ownerName,
       SHARED_LIKES_MARKER,
@@ -937,6 +950,7 @@
         {
           version: 1,
           ownerName,
+          projectId: String(projectId || "").trim(),
           color: normalizeColor(color),
           settings,
           updatedAt: new Date().toISOString(),
@@ -1128,14 +1142,14 @@
     return getSharedStateFromLikeIndexNodes(canvas.nodes ?? [], ownerName);
   }
 
-  function getSharedLikesFromCanvas(canvas, ownerName) {
+  function getSharedLikesFromCanvas(canvas, ownerName, options = {}) {
     const allItems = [];
     let ownItems = [];
 
     for (const node of canvas.nodes ?? []) {
       if (!isTextLikeNode(node) || !shouldScanTextNodeForLikes(node)) continue;
       const parsed = parseSharedLikeText(getRawNodeText(node));
-      if (!parsed) continue;
+      if (!belongsToProject(parsed, options)) continue;
       const likedBy = parsed.ownerName || getRawNodeLabel(node) || "Unknown";
       const likedByColor = normalizeColor(parsed.color);
       const items = parsed.items.map((item) => ({ ...item, likedBy, likedByColor }));
@@ -1164,10 +1178,12 @@
   }
 
   async function getSharedLikedItems(payload) {
-    const { color, fileUuid, ownerName } = parseSharedOptions(payload);
+    const options = parseSharedOptions(payload);
+    const { fileUuid, ownerName } = options;
     const canvas = await fetchCanvas(fileUuid);
-    if (payload?.lightweight) return getSharedLikeStateFromCanvas(canvas, ownerName);
-    return getSharedLikesFromCanvas(canvas, ownerName);
+    const state = getSharedLikesFromCanvas(canvas, ownerName, options);
+    if (!payload?.lightweight) return state;
+    return { allKeys: state.allKeys, ownKeys: state.ownKeys, colorByKey: state.colorByKey };
   }
 
   async function getWatchedVideoState(payload) {
@@ -1236,7 +1252,13 @@
         {
           uuid: ownerNode.uuid,
           metaData: ownerNode.metaData || "{}",
-          nodeText: buildSharedLikeText(ownerName, parsed?.items || [], color || parsed?.color, settings)
+          nodeText: buildSharedLikeText(
+            ownerName,
+            parsed?.items || [],
+            color || parsed?.color,
+            settings,
+            parsed?.projectId || ""
+          )
         }
       ],
       delete: []
@@ -1391,13 +1413,14 @@
   }
 
   async function toggleSharedLike(payload, retryCount = 1) {
-    const { color, fileUuid, ownerName } = parseSharedOptions(payload);
+    const options = parseSharedOptions(payload);
+    const { color, fileUuid, ownerName } = options;
     const item = payload?.item;
     const likeKey = getLikeKey(item);
     if (!likeKey) throw new Error("Selected Pixmax item has no stable Like key.");
 
     const canvas = await fetchCanvas(fileUuid);
-    const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], ownerName);
+    const ownerNode = findSharedLikesOwnerNode(canvas.nodes ?? [], ownerName, options);
     if (!ownerNode) {
       throw new Error(`共享画布里找不到名字为「${ownerName}」的文字节点。`);
     }
@@ -1429,7 +1452,7 @@
         {
           uuid: ownerNode.uuid,
           metaData: ownerNode.metaData || "{}",
-          nodeText: buildSharedLikeText(ownerName, ownItems, ownerColor, parsed?.settings || {})
+          nodeText: buildSharedLikeText(ownerName, ownItems, ownerColor, parsed?.settings || {}, options.projectId)
         }
       ],
       delete: []
@@ -1442,7 +1465,9 @@
       throw new Error(updateResult.errMessage || updateResult.errCode || "共享 Likes 写入失败。");
     }
 
-    window.setTimeout(() => syncLikeIndexForOwnerLater(fileUuid, ownerName, ownerColor, ownItems), 0);
+    if (!options.projectId) {
+      window.setTimeout(() => syncLikeIndexForOwnerLater(fileUuid, ownerName, ownerColor, ownItems), 0);
+    }
     const state = getSharedStateFromLikeIndex({
       owners: [
         {
