@@ -16,7 +16,7 @@ const UPDATE_DIRECTORY_KEY = "extensionDirectory";
 const UPDATE_DIRECTORY_LABEL_KEY = "pixmaxUpdateDirectoryLabel";
 const DEFAULT_DATABASE_URL =
   "https://app.pixmax.cn/workspace/3bba9785-24d6-4b1f-84c1-895d85db4bbe?file=1f14fa50-bdeb-6eaf-9168-47138a4a9766";
-const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/171896542/PixmaxHub-Plug/tree/main";
+const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree/main";
 const DEFAULT_LIKE_COLOR = "#ff3864";
 const CANVAS_REVISION_CONFLICT = "Canvas.Revision.Conflict";
 const UPDATE_FILE_EXTENSIONS = new Set([
@@ -46,6 +46,8 @@ const DEFAULT_OPTIONS = {
   sharedLikesFileUuid: "",
   sharedLikesOwnerName: "",
   sharedLikesColor: DEFAULT_LIKE_COLOR,
+  sharedLikesProjects: [],
+  sharedLikesActiveProjectId: "",
   liveCollabEnabled: true,
   githubUpdateUrl: DEFAULT_GITHUB_UPDATE_URL
 };
@@ -54,6 +56,9 @@ const folderSelect = document.querySelector("#eagleFolder");
 const refreshButton = document.querySelector("#refreshFolders");
 const openLikesButton = document.querySelector("#openLikes");
 const status = document.querySelector("#status");
+const sharedLikesProject = document.querySelector("#sharedLikesProject");
+const sharedLikesProjectName = document.querySelector("#sharedLikesProjectName");
+const createSharedProjectButton = document.querySelector("#createSharedProject");
 const sharedLikesEnabled = document.querySelector("#sharedLikesEnabled");
 const liveCollabEnabled = document.querySelector("#liveCollabEnabled");
 const sharedLikesCanvasUrl = document.querySelector("#sharedLikesCanvasUrl");
@@ -75,6 +80,8 @@ let storedFolderId = "";
 let userStateTimer = 0;
 let colorSyncTimer = 0;
 let pendingUpdatePackage = null;
+let sharedProjects = [];
+let activeSharedProjectId = "";
 
 init();
 
@@ -89,23 +96,26 @@ function init() {
       folderSelect.value = storedFolderId;
       setStatus("已读取保存的 Eagle 目录。点击刷新可重新选择。", "success");
     }
-    sharedLikesEnabled.checked = Boolean(options.sharedLikesEnabled);
     liveCollabEnabled.checked = Boolean(options.liveCollabEnabled);
-    sharedLikesCanvasUrl.value = options.sharedLikesCanvasUrl || "";
-    if (!sharedLikesCanvasUrl.value) sharedLikesCanvasUrl.value = DEFAULT_DATABASE_URL;
-    sharedLikesOwnerName.value = options.sharedLikesOwnerName || "";
-    sharedLikesColor.value = normalizeColor(options.sharedLikesColor);
-    sharedLikesColorText.textContent = sharedLikesColor.value;
+    sharedProjects = PixmaxProjectScopes.migrateProjects(options);
+    activeSharedProjectId = PixmaxProjectScopes.findProject(
+      sharedProjects,
+      "",
+      options.sharedLikesActiveProjectId
+    )?.id || sharedProjects[0]?.id || "";
+    renderSharedProjectSelect();
+    loadSelectedProjectIntoForm();
     githubUpdateUrl.value = normalizeGithubUpdateUrl(options.githubUpdateUrl || DEFAULT_GITHUB_UPDATE_URL);
     if (githubUpdateUrl.value !== options.githubUpdateUrl) {
       storageSyncSet({ githubUpdateUrl: githubUpdateUrl.value }).catch(() => {});
     }
-    if (options.sharedLikesEnabled && options.sharedLikesFileUuid && options.sharedLikesOwnerName) {
+    const selectedProject = getSelectedSharedProject();
+    if (selectedProject?.enabled && selectedProject.fileUuid && selectedProject.ownerName) {
       setSharedStatus("已启用共享 Likes。", "success");
     }
-    if (options.sharedLikesFileUuid && options.sharedLikesOwnerName) {
+    if (selectedProject?.fileUuid && selectedProject.ownerName) {
       window.setTimeout(
-        () => refreshSharedUpdateDirectoryLabel(options.sharedLikesFileUuid, options.sharedLikesOwnerName),
+        () => refreshSharedUpdateDirectoryLabel(selectedProject.fileUuid, selectedProject.ownerName),
         800
       );
     }
@@ -118,6 +128,8 @@ function init() {
 
   refreshButton.addEventListener("click", loadFolders);
   folderSelect.addEventListener("change", saveSelectedFolder);
+  sharedLikesProject.addEventListener("change", selectSharedProject);
+  createSharedProjectButton.addEventListener("click", createSharedProject);
   sharedLikesCanvasUrl.addEventListener("input", scheduleSharedUserStateRefresh);
   sharedLikesOwnerName.addEventListener("input", scheduleSharedUserStateRefresh);
   sharedLikesColor.addEventListener("input", () => {
@@ -136,8 +148,68 @@ function init() {
   refreshUpdateDirectoryStatus();
 }
 
+function getSelectedSharedProject() {
+  return sharedProjects.find((project) => project.id === activeSharedProjectId) || null;
+}
+
+function renderSharedProjectSelect() {
+  sharedLikesProject.textContent = "";
+  for (const project of sharedProjects) sharedLikesProject.append(new Option(project.name, project.id));
+  sharedLikesProject.value = activeSharedProjectId;
+}
+
+function loadSelectedProjectIntoForm() {
+  const project = getSelectedSharedProject();
+  if (!project) return;
+  sharedLikesProjectName.value = project.name;
+  sharedLikesEnabled.checked = Boolean(project.enabled);
+  sharedLikesCanvasUrl.value = project.canvasUrl || DEFAULT_DATABASE_URL;
+  sharedLikesOwnerName.value = project.ownerName || "";
+  sharedLikesColor.value = normalizeColor(project.color);
+  sharedLikesColorText.textContent = sharedLikesColor.value;
+}
+
+async function selectSharedProject() {
+  activeSharedProjectId = sharedLikesProject.value;
+  loadSelectedProjectIntoForm();
+  await persistSharedProjects();
+  scheduleSharedUserStateRefresh();
+  refreshSharedUsers({ silent: true });
+}
+
+async function createSharedProject() {
+  const project = PixmaxProjectScopes.createProject({ name: "新项目", enabled: false });
+  sharedProjects.push(project);
+  activeSharedProjectId = project.id;
+  renderSharedProjectSelect();
+  loadSelectedProjectIntoForm();
+  await persistSharedProjects();
+  setSharedStatus("已新增独立项目；设置它自己的画布链接和成员后保存。", "success");
+}
+
+function updateSelectedProject(patch) {
+  const current = getSelectedSharedProject();
+  if (!current) throw new Error("请先选择项目。");
+  const next = PixmaxProjectScopes.normalizeProject({ ...current, ...patch });
+  sharedProjects = sharedProjects.map((project) => (project.id === current.id ? next : project));
+  return next;
+}
+
+async function persistSharedProjects() {
+  const project = getSelectedSharedProject() || PixmaxProjectScopes.createProject({ enabled: false });
+  return storageSyncSet({
+    sharedLikesActiveProjectId: activeSharedProjectId,
+    sharedLikesProjects: sharedProjects,
+    sharedLikesEnabled: project.enabled,
+    sharedLikesCanvasUrl: project.canvasUrl,
+    sharedLikesFileUuid: project.fileUuid,
+    sharedLikesOwnerName: project.ownerName,
+    sharedLikesColor: project.color
+  });
+}
+
 function openLikesPage() {
-  const url = chrome.runtime.getURL("likes.html");
+  const url = chrome.runtime.getURL(`likes.html?project=${encodeURIComponent(activeSharedProjectId)}`);
   window.open(url, "_blank", "noopener");
 }
 
@@ -193,6 +265,22 @@ function saveSelectedFolder() {
 }
 
 async function saveSharedLikesOptions() {
+  await saveLegacySharedLikesOptions();
+  const canvasUrl = sharedLikesCanvasUrl.value.trim();
+  updateSelectedProject({
+    canvasUrl,
+    color: normalizeColor(sharedLikesColor.value),
+    enabled: sharedLikesEnabled.checked,
+    fileUuid: extractFileUuid(canvasUrl),
+    name: sharedLikesProjectName.value.trim() || getSelectedSharedProject()?.name || "新项目",
+    ownerName: sharedLikesOwnerName.value.trim(),
+    workspaceId: PixmaxProjectScopes.extractWorkspaceId(canvasUrl)
+  });
+  renderSharedProjectSelect();
+  await persistSharedProjects();
+}
+
+async function saveLegacySharedLikesOptions() {
   const canvasUrl = sharedLikesCanvasUrl.value.trim();
   const ownerName = sharedLikesOwnerName.value.trim();
   let color = normalizeColor(sharedLikesColor.value);
@@ -275,6 +363,12 @@ function scheduleSharedColorSync() {
 }
 
 async function syncSharedColor() {
+  await syncLegacySharedColor();
+  updateSelectedProject({ color: normalizeColor(sharedLikesColor.value) });
+  await persistSharedProjects();
+}
+
+async function syncLegacySharedColor() {
   const canvasUrl = sharedLikesCanvasUrl.value.trim();
   const fileUuid = extractFileUuid(canvasUrl);
   const ownerName = sharedLikesOwnerName.value.trim();
@@ -296,6 +390,21 @@ async function syncSharedColor() {
 }
 
 async function createSharedUser() {
+  await createLegacySharedUser();
+  const canvasUrl = sharedLikesCanvasUrl.value.trim();
+  updateSelectedProject({
+    canvasUrl,
+    color: normalizeColor(sharedLikesColor.value),
+    fileUuid: extractFileUuid(canvasUrl),
+    name: sharedLikesProjectName.value.trim() || getSelectedSharedProject()?.name || "新项目",
+    ownerName: sharedLikesOwnerName.value.trim(),
+    workspaceId: PixmaxProjectScopes.extractWorkspaceId(canvasUrl)
+  });
+  renderSharedProjectSelect();
+  await persistSharedProjects();
+}
+
+async function createLegacySharedUser() {
   const canvasUrl = sharedLikesCanvasUrl.value.trim();
   const ownerName = sharedLikesOwnerName.value.trim();
   const color = normalizeColor(sharedLikesColor.value);
@@ -526,6 +635,8 @@ async function useSharedUser(user) {
       sharedLikesOwnerName: user.ownerName,
       sharedLikesColor: color
     });
+    updateSelectedProject({ canvasUrl, color, fileUuid, ownerName: user.ownerName });
+    await persistSharedProjects();
     setSharedStatus(`已切换到用户：${user.ownerName}，继承 ${user.itemCount} 个收藏。`, "success");
     await refreshSharedUserState();
     await refreshSharedUpdateDirectoryLabel(fileUuid, user.ownerName);
@@ -557,6 +668,11 @@ async function deleteSharedUser(user) {
       sharedLikesColor.value = DEFAULT_LIKE_COLOR;
       sharedLikesColorText.textContent = DEFAULT_LIKE_COLOR;
     }
+    updateSelectedProject({
+      color: normalizeColor(sharedLikesColor.value),
+      ownerName: sharedLikesOwnerName.value.trim()
+    });
+    await persistSharedProjects();
     setSharedStatus(`已删除用户：${user.ownerName}`, "success");
     await refreshSharedUsers({ silent: true });
     await refreshSharedUserState();
@@ -615,6 +731,7 @@ function parseSharedLikeText(value) {
     return {
       color: normalizeColor(data.color),
       ownerName: String(data.ownerName || "").trim(),
+      projectId: String(data.projectId || "").trim(),
       settings: data.settings && typeof data.settings === "object" ? data.settings : {},
       items: data.items.filter((item) => item && typeof item === "object")
     };
@@ -740,7 +857,7 @@ function getSharedUserSummaries(nodes) {
   const usersByName = new Map();
   for (const node of nodes.filter(isTextLikeNode)) {
     const parsed = parseSharedLikeText(getRawNodeText(node));
-    if (!parsed?.ownerName) continue;
+    if (!parsed?.ownerName || !belongsToSelectedProject(parsed)) continue;
 
     const existing = usersByName.get(parsed.ownerName);
     const itemCount = parsed.items.length;
@@ -941,14 +1058,21 @@ function isTextLikeNode(rawNode) {
   return typeof rawNode?.nodeText === "string";
 }
 
+function belongsToSelectedProject(parsed) {
+  if (parsed?.projectId) return parsed.projectId === getSelectedSharedProject()?.id;
+  return Boolean(getSelectedSharedProject()?.acceptLegacyData);
+}
+
 function findSharedLikesOwnerNode(nodes, ownerName) {
   const normalizedOwner = ownerName.trim();
   const textNodes = nodes.filter(isTextLikeNode);
   const marked = textNodes.find((node) => {
     const parsed = parseSharedLikeText(getRawNodeText(node));
-    return parsed?.ownerName === normalizedOwner;
+    return parsed?.ownerName === normalizedOwner && belongsToSelectedProject(parsed);
   });
   if (marked) return marked;
+
+  if (getSelectedSharedProject()?.id && !getSelectedSharedProject()?.acceptLegacyData) return null;
 
   const byLabel = textNodes.find((node) => getRawNodeLabel(node) === normalizedOwner);
   if (byLabel) return byLabel;
@@ -964,9 +1088,10 @@ function buildSharedLikeText(ownerName, items, color, settings = {}) {
     ownerName,
     SHARED_LIKES_MARKER,
     JSON.stringify(
-      {
-        version: 1,
-        ownerName,
+        {
+          version: 1,
+          ownerName,
+          projectId: getSelectedSharedProject()?.id || "",
         color: normalizeColor(color),
         settings,
         updatedAt: new Date().toISOString(),

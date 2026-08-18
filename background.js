@@ -103,7 +103,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === MESSAGE.OPEN_REVIEW_BOARD) {
-    openReviewBoard()
+    openReviewBoard(message.projectId)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: friendlyError(error) }));
     return true;
@@ -739,10 +739,11 @@ if (chrome.webRequest?.onErrorOccurred) {
   }, JIMENG_TRACE_URL_FILTER);
 }
 
-async function openReviewBoard() {
+async function openReviewBoard(projectId = "") {
+  const query = String(projectId || "").trim();
   const tab = await chrome.tabs.create({
     active: true,
-    url: chrome.runtime.getURL("likes.html")
+    url: chrome.runtime.getURL(query ? `likes.html?project=${encodeURIComponent(query)}` : "likes.html")
   });
   return { tabId: tab?.id };
 }

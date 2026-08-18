@@ -20,7 +20,14 @@
       <p id="status" class="status">请先打开 Eagle App，再刷新目录。</p>
 
       <details class="section">
-        <summary>用户与共享 Likes</summary>
+        <summary>项目与共享 Likes</summary>
+        <label for="sharedLikesProject">项目空间</label>
+        <div class="row">
+          <select id="sharedLikesProject"></select>
+          <button id="createSharedProject" type="button">新增</button>
+        </div>
+        <label for="sharedLikesProjectName">项目名称</label>
+        <input id="sharedLikesProjectName" type="text" placeholder="例如 海悦、iQOO">
         <label class="check">
           <input id="sharedLikesEnabled" type="checkbox">
           <span>使用共享画布文字节点同步收藏</span>
@@ -67,6 +74,7 @@
         <p id="updateStatus" class="status">请填写 GitHub 仓库地址后检查更新。</p>
       </details>
     </main>
+    <script src="project-scopes.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

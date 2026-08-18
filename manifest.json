@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PixmaxHub Plug",
-  "version": "2.0.35",
+  "version": "2.0.36",
   "description": "Add Pixmax and Jimeng collection helpers, Eagle import, and a shared team review board.",
   "permissions": [
     "storage",
@@ -36,6 +36,7 @@
         "https://app.pixmax.cn/*"
       ],
       "js": [
+        "project-scopes.js",
         "bridge.js"
       ],
       "run_at": "document_start",
@@ -47,6 +48,7 @@
       ],
       "js": [
         "relay.js",
+        "project-scopes.js",
         "content.js"
       ],
       "run_at": "document_idle"
