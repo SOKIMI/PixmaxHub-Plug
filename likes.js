@@ -28,7 +28,6 @@ const MESSAGE = {
   EAGLE_IMPORT_URL: "pixmax-cloner:eagle-import-url"
 };
 const DEFAULT_LIKE_COLOR = "#ff3864";
-const REQUESTED_PROJECT_ID = new URLSearchParams(location.search).get("project") || "";
 const SHARED_OPTIONS_DEFAULTS = {
   sharedLikesEnabled: false,
   sharedLikesCanvasUrl: "",
@@ -38,6 +37,10 @@ const SHARED_OPTIONS_DEFAULTS = {
   sharedLikesProjects: [],
   sharedLikesActiveProjectId: ""
 };
+
+function getRequestedProjectId() {
+  return new URLSearchParams(location.search).get("project") || "";
+}
 
 const grid = document.querySelector("#likesGrid");
 const count = document.querySelector("#count");
@@ -1649,7 +1652,7 @@ function getSharedOptions(options) {
   const project = globalThis.PixmaxProjectScopes?.findProject(
     projects,
     "",
-    REQUESTED_PROJECT_ID || options.sharedLikesActiveProjectId
+    getRequestedProjectId() || options.sharedLikesActiveProjectId
   ) || null;
   const fileUuid = String(project?.fileUuid || "").trim();
   const ownerName = String(project?.ownerName || "").trim();
