@@ -685,6 +685,7 @@
         const indexedUrl = resolveOriginalUrl(video, contextUrls);
         if (!indexedUrl) continue;
         const candidate = originalCandidates.find((item) => item.url === indexedUrl);
+        if (!candidate?.verified) continue;
         dispatchResolveResult(requestId, {
           source: candidate?.hint || "jimeng-indexed-response",
           url: indexedUrl,

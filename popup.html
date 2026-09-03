@@ -25,8 +25,12 @@
         <div class="row">
           <select id="sharedLikesProject"></select>
           <button id="createSharedProject" type="button">新增</button>
+          <button id="deleteSharedProject" class="danger" type="button">删除</button>
         </div>
-        <label for="sharedLikesProjectName">项目名称</label>
+        <div class="project-name-row">
+          <label for="sharedLikesProjectName">项目名称</label>
+          <button id="renameSharedProject" class="text-button" type="button">重命名</button>
+        </div>
         <input id="sharedLikesProjectName" type="text" placeholder="例如 海悦、iQOO">
         <label class="check">
           <input id="sharedLikesEnabled" type="checkbox">

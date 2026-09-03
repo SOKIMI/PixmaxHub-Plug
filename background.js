@@ -49,6 +49,7 @@ const jimengFullTraces = new Map();
 const jimengPixmaxUploadJobs = new Map();
 const pixmaxCanvasMutationLocks = new Map();
 let jimengArchiveIdentityStorageGate = Promise.resolve();
+let eagleImportGate = Promise.resolve();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return false;
@@ -807,7 +808,7 @@ async function importUrlToEagle(item) {
     name,
     website
   };
-  const result = await eagleFetch(options.eagleApiUrl, "/api/item/addFromURL", {
+  const result = await withEagleImportLock(() => eagleFetch(options.eagleApiUrl, "/api/item/addFromURL", {
     ...eagleItem,
     headers: isJimengItem
       ? {
@@ -816,13 +817,24 @@ async function importUrlToEagle(item) {
         }
       : { Referer: referer },
     url
-  });
+  }));
 
   return {
     folderName: options.eagleFolderName || options.eagleFolderId,
     name,
     result
   };
+}
+
+function withEagleImportLock(task) {
+  const previous = eagleImportGate.catch(() => {});
+  let release;
+  eagleImportGate = new Promise((resolve) => {
+    release = resolve;
+  });
+  return previous
+    .then(task)
+    .finally(() => release());
 }
 
 function buildEagleAnnotation(item) {

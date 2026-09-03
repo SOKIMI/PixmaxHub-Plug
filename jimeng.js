@@ -566,7 +566,7 @@
     renderEagleButtonLabel(button, "读取原片…");
     try {
       const beforeDownloadItem = buildJimengLikeItem(video);
-      const original = await captureOfficialOriginalUrl(video, { allowIndexedOriginal: true });
+      const original = await withOriginalResolutionLock(() => captureOfficialOriginalUrl(video));
       renderEagleButtonLabel(button, "导入 Eagle…");
       const refreshedVideo = video.isConnected
         ? video
@@ -1442,13 +1442,14 @@
         const relatedPreviewUrls = [candidate?.contextPreviewUrl, ...(candidate?.previewUrls || [])]
           .map(normalizeUrl)
           .filter(Boolean);
-        const matchesPreview = candidate?.contextKey === previewKey
-          || relatedPreviewUrls.includes(previewUrl)
+        const exactPreviewMatch = relatedPreviewUrls.includes(previewUrl);
+        const matchesPreview = exactPreviewMatch
+          || candidate?.contextKey === previewKey
           || relatedPreviewUrls.some((value) => getJimengLikeKey(value) === previewKey);
         if (!url || !matchesPreview) return null;
         const hint = String(candidate?.hint || "").toLowerCase();
         const lowerUrl = url.toLowerCase();
-        let score = 0;
+        let score = exactPreviewMatch && url !== previewUrl ? 1000 : 0;
         if (url === previewUrl) score -= 80;
         if (getJimengLikeKey(url) === previewKey) score += 80;
         if (/download|original|origin|source|no_watermark|without_watermark|unwatermark|原片|原视频|下载/.test(hint)) score += 120;

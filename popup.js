@@ -59,6 +59,8 @@ const status = document.querySelector("#status");
 const sharedLikesProject = document.querySelector("#sharedLikesProject");
 const sharedLikesProjectName = document.querySelector("#sharedLikesProjectName");
 const createSharedProjectButton = document.querySelector("#createSharedProject");
+const renameSharedProjectButton = document.querySelector("#renameSharedProject");
+const deleteSharedProjectButton = document.querySelector("#deleteSharedProject");
 const sharedLikesEnabled = document.querySelector("#sharedLikesEnabled");
 const liveCollabEnabled = document.querySelector("#liveCollabEnabled");
 const sharedLikesCanvasUrl = document.querySelector("#sharedLikesCanvasUrl");
@@ -130,6 +132,8 @@ function init() {
   folderSelect.addEventListener("change", saveSelectedFolder);
   sharedLikesProject.addEventListener("change", selectSharedProject);
   createSharedProjectButton.addEventListener("click", createSharedProject);
+  renameSharedProjectButton.addEventListener("click", renameSharedProject);
+  deleteSharedProjectButton.addEventListener("click", deleteSharedProject);
   sharedLikesCanvasUrl.addEventListener("input", scheduleSharedUserStateRefresh);
   sharedLikesOwnerName.addEventListener("input", scheduleSharedUserStateRefresh);
   sharedLikesColor.addEventListener("input", () => {
@@ -158,6 +162,10 @@ function renderSharedProjectSelect() {
   sharedLikesProject.textContent = "";
   for (const project of sharedProjects) sharedLikesProject.append(new Option(project.name, project.id));
   sharedLikesProject.value = activeSharedProjectId;
+  const hasProject = Boolean(getSelectedSharedProject());
+  sharedLikesProject.disabled = !hasProject;
+  renameSharedProjectButton.disabled = !hasProject;
+  deleteSharedProjectButton.disabled = sharedProjects.length <= 1 || !hasProject;
 }
 
 function loadSelectedProjectIntoForm() {
@@ -187,6 +195,52 @@ async function createSharedProject() {
   loadSelectedProjectIntoForm();
   await persistSharedProjects();
   setSharedStatus("已新增独立项目；设置它自己的画布链接和成员后保存。", "success");
+}
+
+async function renameSharedProject() {
+  const current = getSelectedSharedProject();
+  const name = sharedLikesProjectName.value.trim();
+  if (!current) {
+    setSharedStatus("请先选择一个项目。", "error");
+    return;
+  }
+  if (!name) {
+    setSharedStatus("项目名称不能为空。", "error");
+    sharedLikesProjectName.focus();
+    return;
+  }
+
+  updateSelectedProject({ name });
+  renderSharedProjectSelect();
+  loadSelectedProjectIntoForm();
+  await persistSharedProjects();
+  setSharedStatus(`项目已重命名为“${name}”。`, "success");
+}
+
+async function deleteSharedProject() {
+  const current = getSelectedSharedProject();
+  if (!current) {
+    setSharedStatus("请先选择一个项目。", "error");
+    return;
+  }
+  if (sharedProjects.length <= 1) {
+    setSharedStatus("至少保留一个项目；如需停用，请关闭共享 Likes。", "error");
+    return;
+  }
+
+  const confirmed = confirm(
+    `确定移除项目“${current.name}”吗？这只会删除本机的项目配置，不会删除 Pixmax 画布或团队数据。`
+  );
+  if (!confirmed) return;
+
+  sharedProjects = sharedProjects.filter((project) => project.id !== current.id);
+  activeSharedProjectId = sharedProjects[0]?.id || "";
+  renderSharedProjectSelect();
+  loadSelectedProjectIntoForm();
+  await persistSharedProjects();
+  scheduleSharedUserStateRefresh();
+  refreshSharedUsers({ silent: true });
+  setSharedStatus(`已移除项目“${current.name}”。画布数据仍然保留。`, "success");
 }
 
 function updateSelectedProject(patch) {
