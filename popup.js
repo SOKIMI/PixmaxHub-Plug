@@ -162,18 +162,21 @@ function renderSharedProjectSelect() {
   sharedLikesProject.textContent = "";
   for (const project of sharedProjects) sharedLikesProject.append(new Option(project.name, project.id));
   sharedLikesProject.value = activeSharedProjectId;
-  const hasProject = Boolean(getSelectedSharedProject());
+  const current = getSelectedSharedProject();
+  const hasProject = Boolean(current);
   sharedLikesProject.disabled = !hasProject;
-  renameSharedProjectButton.disabled = !hasProject;
-  deleteSharedProjectButton.disabled = sharedProjects.length <= 1 || !hasProject;
+  renameSharedProjectButton.disabled = !hasProject || current.isTeamPreset;
+  deleteSharedProjectButton.disabled = sharedProjects.length <= 1 || !hasProject || current.isTeamPreset;
 }
 
 function loadSelectedProjectIntoForm() {
   const project = getSelectedSharedProject();
   if (!project) return;
   sharedLikesProjectName.value = project.name;
+  sharedLikesProjectName.readOnly = Boolean(project.isTeamPreset);
   sharedLikesEnabled.checked = Boolean(project.enabled);
   sharedLikesCanvasUrl.value = project.canvasUrl || DEFAULT_DATABASE_URL;
+  sharedLikesCanvasUrl.readOnly = Boolean(project.isTeamPreset);
   sharedLikesOwnerName.value = project.ownerName || "";
   sharedLikesColor.value = normalizeColor(project.color);
   sharedLikesColorText.textContent = sharedLikesColor.value;
@@ -204,6 +207,10 @@ async function renameSharedProject() {
     setSharedStatus("请先选择一个项目。", "error");
     return;
   }
+  if (current.isTeamPreset) {
+    setSharedStatus("团队预置项目名称由插件统一维护。", "error");
+    return;
+  }
   if (!name) {
     setSharedStatus("项目名称不能为空。", "error");
     sharedLikesProjectName.focus();
@@ -221,6 +228,10 @@ async function deleteSharedProject() {
   const current = getSelectedSharedProject();
   if (!current) {
     setSharedStatus("请先选择一个项目。", "error");
+    return;
+  }
+  if (current.isTeamPreset) {
+    setSharedStatus("团队预置项目会自动提供给所有成员，不能在本机删除。", "error");
     return;
   }
   if (sharedProjects.length <= 1) {

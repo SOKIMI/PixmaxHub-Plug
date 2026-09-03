@@ -3,6 +3,18 @@
 (() => {
   const LEGACY_PROJECT_ID = "project-haiyue";
   const LEGACY_PROJECT_NAME = "海悦";
+  const TEAM_PROJECT_PRESETS = Object.freeze([
+    Object.freeze({
+      acceptLegacyData: true,
+      canvasUrl: "https://app.pixmax.cn/workspace/3bba9785-24d6-4b1f-84c1-895d85db4bbe?file=1f14fa50-bdeb-6eaf-9168-47138a4a9766",
+      id: LEGACY_PROJECT_ID,
+      name: LEGACY_PROJECT_NAME
+    }),
+    Object.freeze({
+      canvasUrl: "https://app.pixmax.cn/workspace/987f2296-e6cd-4a9d-bd12-9567a0247066?file=1f19b0ce-e717-62fd-bc8f-b3a87e586bc1",
+      name: "iQOO"
+    })
+  ]);
 
   function extractWorkspaceId(value) {
     try {
@@ -47,6 +59,7 @@
       enabled: value.enabled !== false,
       fileUuid,
       id,
+      isTeamPreset: Boolean(value.isTeamPreset),
       legacyIds,
       name: String(value.name || `项目 ${index + 1}`).trim() || `项目 ${index + 1}`,
       ownerName: String(value.ownerName || value.sharedLikesOwnerName || "").trim(),
@@ -54,11 +67,37 @@
     };
   }
 
+  function mergeTeamProjectPresets(projects) {
+    const merged = projects.map(normalizeProject).filter((project) => project.id);
+    for (const value of TEAM_PROJECT_PRESETS) {
+      const preset = normalizeProject({ ...value, isTeamPreset: true });
+      const index = merged.findIndex((project) => (
+        project.id === preset.id
+        || (preset.fileUuid && project.fileUuid === preset.fileUuid)
+      ));
+      if (index < 0) {
+        merged.push(preset);
+        continue;
+      }
+      const existing = merged[index];
+      merged[index] = normalizeProject({
+        ...preset,
+        ...existing,
+        acceptLegacyData: preset.acceptLegacyData || existing.acceptLegacyData,
+        canvasUrl: existing.canvasUrl || preset.canvasUrl,
+        fileUuid: existing.fileUuid || preset.fileUuid,
+        isTeamPreset: true,
+        workspaceId: existing.workspaceId || preset.workspaceId
+      });
+    }
+    return merged;
+  }
+
   function migrateProjects(options = {}) {
     if (Array.isArray(options.sharedLikesProjects) && options.sharedLikesProjects.length) {
-      return options.sharedLikesProjects.map(normalizeProject).filter((project) => project.id);
+      return mergeTeamProjectPresets(options.sharedLikesProjects);
     }
-    return [normalizeProject({
+    return mergeTeamProjectPresets([normalizeProject({
       acceptLegacyData: true,
       canvasUrl: options.sharedLikesCanvasUrl,
       color: options.sharedLikesColor,
@@ -68,7 +107,7 @@
       name: LEGACY_PROJECT_NAME,
       ownerName: options.sharedLikesOwnerName,
       workspaceId: extractWorkspaceId(options.sharedLikesCanvasUrl)
-    })];
+    })]);
   }
 
   function findProject(projects, workspaceId = "", preferredProjectId = "", fileUuid = "") {
