@@ -75,7 +75,8 @@
             <button id="applyUpdate" class="secondary compact" type="button" disabled>安装更新</button>
           </div>
         </div>
-        <p id="updateStatus" class="status">请填写 GitHub 仓库地址后检查更新。</p>
+        <progress id="updateProgress" max="100" hidden aria-label="更新进度"></progress>
+        <p id="updateStatus" class="status" role="status">请填写 GitHub 仓库地址后检查更新。</p>
       </details>
     </main>
     <script src="project-scopes.js"></script>

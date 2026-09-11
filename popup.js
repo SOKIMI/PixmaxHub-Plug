@@ -1181,7 +1181,7 @@ async function checkForUpdate(options = {}) {
     return;
   }
 
-  setUpdateBusy(true, silent ? "" : "检查中...");
+  setUpdateBusy(true, "正在连接 GitHub，请保持此窗口打开…");
   pendingUpdatePackage = null;
   applyUpdateButton.disabled = true;
 
@@ -1195,6 +1195,7 @@ async function checkForUpdate(options = {}) {
       throw new Error("GitHub 仓库里的 manifest.json 版本号格式不正确。");
     }
     if (compareVersions(latest.version, currentVersion) <= 0) {
+      setUpdateProgress(100, `当前已是最新版本 ${currentVersion}。GitHub 版本：${latest.version}`);
       if (!silent) {
         setUpdateStatus(`当前已是最新版本 ${currentVersion}。GitHub 版本：${latest.version}`, "success");
       }
@@ -1208,12 +1209,13 @@ async function checkForUpdate(options = {}) {
       version: latest.version
     };
     applyUpdateButton.disabled = false;
+    setUpdateProgress(100, `更新包已就绪：${latest.version}，可点击安装更新。`);
     setUpdateStatus(
       `发现 GitHub 新版本 ${latest.version}，当前 ${currentVersion}。`,
       "success"
     );
   } catch (error) {
-    if (!silent) setUpdateStatus(error.message || String(error), "error");
+    setUpdateStatus(error.message || String(error), "error");
   } finally {
     setUpdateBusy(false);
   }
@@ -1275,11 +1277,31 @@ async function resolveGithubUpdateSource(value) {
 }
 
 async function fetchGithubUpdateFiles(source) {
-  const response = await fetch(githubTarballUrl(source));
+  const response = await fetch(githubTarballUrl(source), { signal: AbortSignal.timeout(120000) });
   if (!response.ok) {
     throw new Error(await githubResponseError(response, "下载 GitHub 更新包失败"));
   }
-  const compressedBytes = new Uint8Array(await response.arrayBuffer());
+  const total = Number(response.headers.get("content-length")) || 0;
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  setUpdateProgress(null, "正在下载更新包…");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    const amount = `${(received / 1024).toFixed(0)} KB`;
+    setUpdateProgress(total ? Math.min(99, received / total * 100) : null,
+      `正在下载：${amount}${total ? ` / ${(total / 1024).toFixed(0)} KB` : "（总大小未知）"}，请保持此窗口打开`);
+  }
+  const compressedBytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    compressedBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  setUpdateProgress(null, "下载完成，正在解压并校验更新包…");
   const archiveBytes = await ungzip(compressedBytes);
   return parseGithubTarArchive(archiveBytes);
 }
@@ -1329,6 +1351,7 @@ async function applyPendingUpdate() {
   }
 
   try {
+    setUpdateBusy(true, "正在获取更新目录权限…");
     const directory = await getWritableUpdateDirectory();
     setUpdateBusy(true, "安装中...");
 
@@ -1336,7 +1359,7 @@ async function applyPendingUpdate() {
     validateUpdateFiles(files);
     await writeUpdateFiles(directory, files);
 
-    setUpdateStatus(`已安装 ${pendingUpdatePackage.version}，正在重新加载扩展...`, "success");
+    setUpdateProgress(100, `已安装 ${pendingUpdatePackage.version}，正在重新加载扩展…`);
     window.setTimeout(() => chrome.runtime.reload(), 500);
   } catch (error) {
     setUpdateStatus(error.message || String(error), "error");
@@ -1491,11 +1514,16 @@ function validateUpdateFiles(files) {
 }
 
 async function writeUpdateFiles(directory, files) {
-  for (const [path, bytes] of files) {
+  let completed = 0;
+  const entries = [...files].sort(([a], [b]) => Number(a === "manifest.json") - Number(b === "manifest.json"));
+  for (const [path, bytes] of entries) {
+    setUpdateProgress(completed / files.size * 100, `正在写入 ${completed + 1}/${files.size}：${path}`);
     const handle = await getNestedFileHandle(directory, path);
     const writable = await handle.createWritable();
     await writable.write(bytes);
     await writable.close();
+    completed += 1;
+    setUpdateProgress(completed / files.size * 100, `已写入 ${completed}/${files.size}：${path}`);
   }
 }
 
@@ -1583,10 +1611,23 @@ function setUpdateBusy(busy, text = "") {
   checkUpdateButton.disabled = busy;
   applyUpdateButton.disabled = busy || !pendingUpdatePackage;
   chooseUpdateDirectoryButton.disabled = busy;
-  if (text) updateStatus.textContent = text;
+  githubUpdateUrl.disabled = busy;
+  if (text) setUpdateProgress(null, text);
+}
+
+function setUpdateProgress(value, message) {
+  const progress = document.querySelector("#updateProgress");
+  progress.hidden = false;
+  if (value === null) progress.removeAttribute("value");
+  else progress.value = Math.max(0, Math.min(100, value));
+  setUpdateStatus(message, value === 100 ? "success" : "");
 }
 
 function setUpdateStatus(message, state) {
+  if (state === "error" && /timeout|timed out/i.test(message)) {
+    message = "连接或下载超过两分钟，请检查网络后重新检查更新。";
+  }
+  if (state === "error") document.querySelector("#updateProgress").hidden = true;
   updateStatus.textContent = message;
   updateStatus.classList.toggle("success", state === "success");
   updateStatus.classList.toggle("error", state === "error");
