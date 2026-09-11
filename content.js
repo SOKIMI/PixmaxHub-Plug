@@ -2587,7 +2587,14 @@ const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree
   }
 
   async function refreshWatchedVideoState(options = {}) {
-    if (watchedVideoRefreshPromise) return watchedVideoRefreshPromise;
+    if (watchedVideoRefreshPromise) {
+      try {
+        await watchedVideoRefreshPromise;
+      } catch {
+        // Concurrent callers must also tolerate a failed shared refresh.
+      }
+      return;
+    }
     const refreshAge = Date.now() - watchedVideoLastRefreshAt;
     if (!options.force && videoWatchStateReady && refreshAge < 30000) {
       applyTrackedUnwatchedVideoMarks();
@@ -5192,11 +5199,15 @@ const DEFAULT_GITHUB_UPDATE_URL = "https://github.com/SOKIMI/PixmaxHub-Plug/tree
   }
 
   function hasNativeDownloadAction(toolbar) {
-    return [...toolbar.querySelectorAll("button")].some(
-      (button) =>
-        !button.closest(`.${ACTIONS_CLASS}`) &&
-        button.textContent.trim() === "下载"
-    );
+    const buttons = [...toolbar.querySelectorAll("button, [role='button'], a[download]")]
+      .filter((button) => !button.closest(`.${ACTIONS_CLASS}`));
+    if (buttons.some((button) =>
+      /下载|\bdownload\b/i.test(getElementLabel(button)) || button.hasAttribute("download")
+    )) return true;
+    // Pixmax's media toolbar now uses an unlabelled download icon.
+    // Recognize its paired native actions without depending on SVG paths.
+    const labels = buttons.map((button) => button.textContent.trim());
+    return labels.includes("选中") && labels.includes("创建副本");
   }
 
   function mountToolbarActions(toolbar) {
